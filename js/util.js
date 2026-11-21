@@ -1,6 +1,6 @@
 // Enluminure — outils communs (toiles, limites, modes de fusion)
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -104,6 +104,8 @@ export function mkLayer(p) {
     visible: true,
     clipping: false,
     text: null,   // calque de texte : réglages pour pouvoir le modifier
+    mask: null,   // masque de fusion : { canvas, x, y, def (0 ou 255 hors du masque), disabled }
+    parent: null, // groupe parent
     ...p,
   };
 }

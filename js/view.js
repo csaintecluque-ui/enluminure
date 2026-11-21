@@ -1,7 +1,7 @@
 // Enluminure — zone de travail : affichage, zoom, déplacement, outils
 import { clamp } from './util.js';
 import { updateLayer, pickLayerAt } from './ops.js';
-import { layerRect } from './render.js';
+import { selPath } from './selection.js';
 
 const ZOOM_STEPS = [0.01, 0.02, 0.03, 0.05, 1 / 15, 1 / 12, 0.125, 1 / 6, 0.25, 1 / 3, 0.5, 2 / 3, 1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 64];
 export const MIN_ZOOM = 0.01, MAX_ZOOM = 64;
@@ -141,15 +141,20 @@ export class Viewport {
       ctx.restore();
     }
 
-    // Bords du calque actif (outil Déplacer)
-    const L = d.active;
-    if (L && L.canvas && this.app.tool === 'move' && this.app.opts.showBounds) {
-      const r = layerRect(L);
+    // Sélection : pointillés animés
+    const sel = d.state.selection;
+    if (sel && !(this.app.tool === 'transform')) {
+      const path = selPath(sel);
       ctx.save();
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = '#C9804F';
-      ctx.strokeRect(Math.round(panX + r.x * zoom) + 0.5, Math.round(panY + r.y * zoom) + 0.5, Math.round(r.w * zoom), Math.round(r.h * zoom));
+      ctx.translate(panX + sel.x * zoom, panY + sel.y * zoom);
+      ctx.scale(zoom, zoom);
+      ctx.lineWidth = 1 / zoom;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke(path);
+      ctx.setLineDash([4 / zoom, 4 / zoom]);
+      ctx.lineDashOffset = -(this.antsPhase || 0) / zoom;
+      ctx.strokeStyle = '#000';
+      ctx.stroke(path);
       ctx.restore();
     }
     // Repères de l'outil (cercle du pinceau, cadre de recadrage, ligne du dégradé…)
@@ -220,7 +225,11 @@ export class Viewport {
     if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
       this.app.setCursorInfo(this.toDoc(p));
       this.hover = p;
-      if (!this.action && this.app.tools[this.app.tool]?.overlay) this.requestRender();
+      if (!this.action) {
+        const t = this.app.tools[this.app.tool];
+        t?.hover?.(p, this);
+        if (t?.overlay) this.requestRender();
+      }
     }
     if (this.pinch) { this._updatePinch(); return; }
     const a = this.action;

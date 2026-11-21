@@ -2,14 +2,17 @@
 import { VERSION, el, mkLayer, newCanvas, ctxOf, fitsLimits, LIMITS, isIOS, isMac, baseName, canvasToBlob } from './util.js';
 import { Doc } from './document.js';
 import * as ops from './ops.js';
-import { flattenState } from './render.js';
+import { flattenState, maskedCanvas } from './render.js';
 import { Viewport } from './view.js';
 import { $, toast, openDialog, confirmDialog, field, MenuBar, modalOpen } from './ui.js';
 import { initLayersPanel, renderLayers, renderHistory, renderTabs, initToolbar, renderToolbar, renderOptions, renderStatus, startRename, TOOLS } from './panels.js';
 import { openFileAsDoc, fileToCanvas, isPsd, docToPsdBlob, exportBlob, saveBlob } from './io.js';
 import { icon, LOGO_SMALL } from './icons.js';
 import { createTools, DEFAULT_SETTINGS } from './tools.js';
-import { commitPixels } from './paint.js';
+import { commitPixels, prepareTarget, selIn, lumOf } from './paint.js';
+import { applyBuf } from './document.js';
+import * as tree from './tree.js';
+import * as SEL from './selection.js';
 
 const MOD = isMac || isIOS ? '⌘' : 'Ctrl';
 const K = (s) => s.replace(/Ctrl/g, MOD);
@@ -41,6 +44,14 @@ class App {
     this.bindKeyboard();
     this.bindFiles();
     this.refresh();
+    // pointillés animés de la sélection
+    setInterval(() => {
+      const d = this.doc;
+      if (d && (d.state.selection || this.tools[this.tool]?.drag || this.tools[this.tool]?.poly) && !document.hidden) {
+        this.view.antsPhase = ((this.view.antsPhase || 0) + 1) % 8;
+        this.view.requestRender();
+      }
+    }, 120);
   }
 
   saveOpts() {
@@ -116,6 +127,7 @@ class App {
     const t = TOOLS.find(x => x.id === id);
     if (!t) return;
     if (t.step) { toast(`L'outil ${t.label} arrive à l'étape ${t.step}.`); return; }
+    if (this.tool === 'transform') this.tools.transform.apply();
     if (this.tool !== id) {
       this.view._cancelAction?.();
       this.tools[this.tool]?.deactivate?.();
@@ -151,6 +163,11 @@ class App {
   run(id) {
     const a = this.actions[id];
     if (!a) return;
+    if (this.tool === 'transform' && this.tools.transform.active) {
+      if (id === 'undo' || id === 'redo') { this.tools.transform.abort(); return; }
+      if (!['freeTransform', 'fit', 'zoomIn', 'zoomOut', 'zoom100', 'shortcuts', 'about', 'fullscreen', 'bounds'].includes(id)) this.tools.transform.apply();
+      if (id === 'freeTransform') return;
+    }
     if (a.enabled && !a.enabled()) return;
     this.menubar.close();
     Promise.resolve(a.run()).catch(err => { console.error(err); toast(`Erreur : ${err.message || err}`, 6000); });
@@ -207,33 +224,109 @@ class App {
       newLayer: { enabled: hasDoc, run: () => {
         const d = D(); const l = ops.blankLayer(d.committed);
         this.commit('Nouveau calque', ops.insertLayer(d.committed, l, d.activeId), { activeId: l.id });
+        this.selectLayer(l.id);
       } },
-      duplicateLayer: { enabled: hasLayer, run: () => { const d = D(); const r = ops.duplicateLayer(d.committed, d.activeId); this.commit('Dupliquer le calque', r.state, { activeId: r.activeId }); } },
-      deleteLayer: { enabled: () => !!D()?.active && D().layers.length > 1, run: () => this.commit('Supprimer le calque', ops.removeLayer(D().committed, D().activeId)) },
+      newGroup: { enabled: hasDoc, run: () => {
+        const d = D(), st = d.committed;
+        const g = mkLayer({ kind: 'group', name: ops.nextLayerName(st, 'Groupe'), blend: 'pass through', canvas: null });
+        const above = d.active && !tree.isGroup(d.active) ? d.activeId : d.activeId;
+        this.commit('Nouveau groupe', ops.insertLayer(st, g, above), { activeId: g.id });
+        this.selectLayer(g.id);
+      } },
+      groupLayers: { enabled: hasLayer, run: () => {
+        const d = D();
+        const ids = d.selIds.size ? [...d.selIds] : [d.activeId];
+        const r = tree.groupItems(d.committed, ids, ops.nextLayerName(d.committed, 'Groupe'));
+        if (r) { this.commit('Grouper les calques', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); }
+      } },
+      ungroupLayers: { enabled: () => tree.isGroup(D()?.active), run: () => {
+        const r = tree.ungroup(D().committed, D().activeId);
+        if (r) { this.commit('Dissocier les calques', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); }
+      } },
+      duplicateLayer: { enabled: hasLayer, run: () => {
+        const d = D();
+        if (d.committed.selection && !tree.isGroup(d.active)) { this.layerFromSelection(false); return; }
+        const r = ops.duplicateLayer(d.committed, d.activeId);
+        this.commit(tree.isGroup(d.active) ? 'Dupliquer le groupe' : 'Dupliquer le calque', r.state, { activeId: r.activeId });
+        this.selectLayer(r.activeId);
+      } },
+      layerViaCopy: { enabled: () => hasLayer() && !!D().committed.selection, run: () => this.layerFromSelection(false) },
+      layerViaCut: { enabled: () => hasLayer() && !!D().committed.selection, run: () => this.layerFromSelection(true) },
+      deleteLayer: { enabled: () => !!D()?.active && D().layers.length > 1, run: () => {
+        const d = D();
+        const ids = d.selIds.size > 1 ? [...d.selIds] : [d.activeId];
+        const st = tree.removeItems(d.committed, ids);
+        if (!st.layers.length) { toast('Impossible de supprimer le dernier calque.'); return; }
+        this.commit(ids.length > 1 ? 'Supprimer les calques' : tree.isGroup(d.active) ? 'Supprimer le groupe' : 'Supprimer le calque', st);
+        this.selectLayer(d.activeId);
+      } },
       renameLayer: { enabled: hasLayer, run: () => {
         if (window.matchMedia('(max-width: 760px)').matches && this.panelOpen !== 'layers') this.togglePanel('layers');
         const row = document.querySelector(`.layer-row[data-id="${D().activeId}"]`);
         if (row) startRename(this, row, D().active);
       } },
-      layerUp: { enabled: () => hasLayer() && D().activeIndex < D().layers.length - 1, run: () => { const d = D(); this.commit('Ordre des calques', ops.moveLayerTo(d.committed, d.activeId, d.activeIndex + 1)); } },
-      layerDown: { enabled: () => hasLayer() && D().activeIndex > 0, run: () => { const d = D(); this.commit('Ordre des calques', ops.moveLayerTo(d.committed, d.activeId, d.activeIndex - 1)); } },
-      layerTop: { enabled: () => hasLayer() && D().activeIndex < D().layers.length - 1, run: () => { const d = D(); this.commit('Ordre des calques', ops.moveLayerTo(d.committed, d.activeId, d.layers.length - 1)); } },
-      layerBottom: { enabled: () => hasLayer() && D().activeIndex > 0, run: () => { const d = D(); this.commit('Ordre des calques', ops.moveLayerTo(d.committed, d.activeId, 0)); } },
-      clipLayer: { enabled: () => hasLayer() && D().activeIndex > 0, checked: () => !!D()?.active?.clipping, run: () => {
+      layerUp: { enabled: () => this.canMove(1), run: () => { const d = D(); this.commit('Ordre des calques', tree.moveSibling(d.committed, d.activeId, 1)); } },
+      layerDown: { enabled: () => this.canMove(-1), run: () => { const d = D(); this.commit('Ordre des calques', tree.moveSibling(d.committed, d.activeId, -1)); } },
+      layerTop: { enabled: () => this.canMove(1), run: () => { const d = D(); this.commit('Ordre des calques', tree.moveSibling(d.committed, d.activeId, 1, true)); } },
+      layerBottom: { enabled: () => this.canMove(-1), run: () => { const d = D(); this.commit('Ordre des calques', tree.moveSibling(d.committed, d.activeId, -1, true)); } },
+      clipLayer: { enabled: () => this.canMove(-1), checked: () => !!D()?.active?.clipping, run: () => {
         const d = D(), l = d.active;
         this.commit(l.clipping ? "Annuler le masque d'écrêtage" : "Créer un masque d'écrêtage", ops.updateLayer(d.committed, l.id, { clipping: !l.clipping }));
       } },
       toggleVisible: { enabled: hasLayer, run: () => { const d = D(), l = d.active; this.commit(l.visible ? 'Masquer le calque' : 'Afficher le calque', ops.updateLayer(d.committed, l.id, { visible: !l.visible })); } },
-      mergeDown: { enabled: () => hasLayer() && D().activeIndex > 0, run: () => {
-        const d = D(), i = d.activeIndex;
-        if (!d.layers[i].visible || !d.layers[i - 1].visible) { toast('Impossible de fusionner un calque masqué.'); return; }
+      mergeDown: { enabled: () => hasLayer() && (tree.isGroup(D().active) || (ops.lowerSibling(D().committed, D().activeId) && !tree.isGroup(ops.lowerSibling(D().committed, D().activeId)))), run: () => {
+        const d = D(), l = d.active;
+        if (tree.isGroup(l)) { const r = ops.mergeGroup(d.committed, l.id); if (r) { this.commit('Fusionner le groupe', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); } return; }
+        const low = ops.lowerSibling(d.committed, l.id);
+        if (!l.visible || !low.visible) { toast('Impossible de fusionner un calque masqué.'); return; }
         const r = ops.mergeDown(d.committed, d.activeId);
-        if (r) this.commit('Fusionner avec le calque inférieur', r.state, { activeId: r.activeId });
+        if (r) { this.commit('Fusionner avec le calque inférieur', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); }
       } },
-      mergeVisible: { enabled: () => (D()?.layers.filter(l => l.visible).length || 0) > 1, run: () => {
+      mergeVisible: { enabled: () => (D()?.layers.filter(l => !tree.isGroup(l) && l.visible).length || 0) > 1, run: () => {
         const r = ops.mergeVisible(D().committed);
-        if (r) this.commit('Fusionner les calques visibles', r.state, { activeId: r.activeId });
+        if (r) { this.commit('Fusionner les calques visibles', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); }
       } },
+
+      // ——— Masques de fusion ———
+      maskReveal: { enabled: () => hasLayer() && !D().active.mask, run: () => this.addMask(D().committed.selection ? 'revealSel' : 'reveal') },
+      maskHide: { enabled: () => hasLayer() && !D().active.mask, run: () => this.addMask(D().committed.selection ? 'hideSel' : 'hide') },
+      maskRevealAll: { enabled: () => hasLayer() && !D().active.mask, run: () => this.addMask('reveal') },
+      maskHideAll: { enabled: () => hasLayer() && !D().active.mask, run: () => this.addMask('hide') },
+      maskRevealSel: { enabled: () => hasLayer() && !D().active.mask && !!D().committed.selection, run: () => this.addMask('revealSel') },
+      maskHideSel: { enabled: () => hasLayer() && !D().active.mask && !!D().committed.selection, run: () => this.addMask('hideSel') },
+      maskToggle: { enabled: () => !!D()?.active?.mask, checked: () => !!D()?.active?.mask?.disabled, run: () => {
+        const d = D(), l = d.active;
+        this.commit(l.mask.disabled ? 'Activer le masque' : 'Désactiver le masque', ops.updateLayer(d.committed, l.id, { mask: { ...l.mask, disabled: !l.mask.disabled } }));
+      } },
+      maskDelete: { enabled: () => !!D()?.active?.mask, run: () => { const d = D(); d.target = 'layer'; this.commit('Supprimer le masque', ops.updateLayer(d.committed, d.activeId, { mask: null })); } },
+      maskApply: { enabled: () => !!D()?.active?.mask && !tree.isGroup(D().active), run: () => {
+        const d = D(), l = d.active;
+        const m = { ...l.mask, disabled: false };
+        const c = newCanvas(l.canvas.width, l.canvas.height);
+        ctxOf(c).drawImage(maskedCanvas({ ...l, mask: m }, l.canvas, m.canvas), 0, 0);
+        d.target = 'layer';
+        this.commit('Appliquer le masque', ops.updateLayer(d.committed, l.id, { canvas: c, mask: null, text: null }));
+      } },
+      editMask: { enabled: () => !!D()?.active?.mask, checked: () => D()?.target === 'mask', run: () => { const d = D(); d.target = d.target === 'mask' ? 'layer' : 'mask'; this.refresh({ history: false }); toast(d.target === 'mask' ? 'Vous peignez sur le masque : noir masque, blanc révèle.' : 'Vous peignez sur les pixels du calque.'); } },
+
+      // ——— Sélection ———
+      selectAll: { enabled: hasDoc, run: () => this.setSelection(SEL.selAll(D().width, D().height), 'Tout sélectionner') },
+      deselect: { enabled: () => !!D()?.committed.selection, run: () => { const d = D(); d.lastSelection = d.committed.selection; this.setSelection(null, 'Désélectionner'); } },
+      reselect: { enabled: () => !!D()?.lastSelection && !D().committed.selection, run: () => this.setSelection(D().lastSelection, 'Resélectionner') },
+      invertSel: { enabled: hasDoc, run: () => this.setSelection(SEL.invertSel(D().committed.selection, D().width, D().height), 'Intervertir la sélection') },
+      featherSel: { enabled: () => !!D()?.committed.selection, run: () => this.dialogSelAmount('Contour progressif', 'Rayon (px)', 10, (sel, v) => SEL.featherSel(sel, v)) },
+      growSel: { enabled: () => !!D()?.committed.selection, run: () => this.dialogSelAmount('Dilater la sélection', 'Dilater de (px)', 5, (sel, v) => SEL.growSel(sel, Math.round(v))) },
+      shrinkSel: { enabled: () => !!D()?.committed.selection, run: () => this.dialogSelAmount('Contracter la sélection', 'Contracter de (px)', 5, (sel, v) => SEL.growSel(sel, -Math.round(v))) },
+      selectLayerPixels: { enabled: () => !!D()?.active?.canvas, run: () => { const l = D().active; this.setSelection(SEL.clipSelToDoc(SEL.selFromAlpha(l.canvas, l.x, l.y), D().width, D().height), 'Sélectionner les pixels du calque'); } },
+      selectMask: { enabled: () => !!D()?.active?.mask, run: () => { const m = D().active.mask; this.setSelection(SEL.clipSelToDoc(SEL.selFromAlpha(m.canvas, m.x, m.y), D().width, D().height), 'Sélection depuis le masque'); } },
+      cropToSel: { enabled: () => !!D()?.committed.selection, run: () => {
+        const b = SEL.selBounds(D().committed.selection);
+        this.commit('Recadrer sur la sélection', ops.cropState(D().committed, b, true));
+        this.view.fit(true);
+      } },
+      clearSel: { enabled: () => hasLayer() && !!D().committed.selection, run: () => this.fillLayer(null, 'Effacer') },
+      cut: { enabled: () => hasLayer() && !!D().committed.selection && !tree.isGroup(D().active), run: async () => { await this.copy(false); this.fillLayer(null, 'Couper'); } },
+      freeTransform: { enabled: hasLayer, run: () => this.startTransform() },
 
       zoomIn: { enabled: hasDoc, run: () => this.view.zoomStep(1) },
       zoomOut: { enabled: hasDoc, run: () => this.view.zoomStep(-1) },
@@ -265,7 +358,8 @@ class App {
         { label: 'Annuler', action: 'undo', key: K('Ctrl+Z') },
         { label: 'Rétablir', action: 'redo', key: K('Ctrl+Maj+Z') },
         '-',
-        { label: 'Copier le calque', action: 'copy', key: K('Ctrl+C') },
+        { label: 'Couper', action: 'cut', key: K('Ctrl+X') },
+        { label: 'Copier', action: 'copy', key: K('Ctrl+C') },
         { label: 'Copier avec fusion', action: 'copyMerged', key: K('Ctrl+Maj+C') },
         { label: 'Coller', action: 'paste', key: K('Ctrl+V') },
         '-',
@@ -273,6 +367,7 @@ class App {
         { label: "Remplir avec l'arrière-plan", action: 'fillBg', key: K('Ctrl+Retour') },
         { label: 'Effacer le contenu du calque', action: 'clearLayer' },
         '-',
+        { label: 'Transformation manuelle', action: 'freeTransform', key: K('Ctrl+T') },
         { heading: 'Transformation du calque' },
         { label: 'Rotation 90° horaire', action: 'layerCW' },
         { label: 'Rotation 90° antihoraire', action: 'layerCCW' },
@@ -283,6 +378,7 @@ class App {
       ] },
       { label: 'Image', items: [
         { label: 'Recadrer…', action: 'cropTool', key: 'C' },
+        { label: 'Recadrer sur la sélection', action: 'cropToSel' },
         { label: "Taille de l'image…", action: 'imageSize', key: K('Ctrl+Alt+I') },
         { label: 'Taille de la zone de travail…', action: 'canvasSize', key: K('Ctrl+Alt+C') },
         '-',
@@ -297,13 +393,28 @@ class App {
       ] },
       { label: 'Calque', items: [
         { label: 'Nouveau calque', action: 'newLayer', key: K('Ctrl+Maj+N') },
+        { label: 'Nouveau groupe', action: 'newGroup' },
         { label: 'Dupliquer le calque', action: 'duplicateLayer', key: K('Ctrl+J') },
+        { label: 'Calque par copie (sélection)', action: 'layerViaCopy', key: K('Ctrl+J') },
+        { label: 'Calque par coupe (sélection)', action: 'layerViaCut', key: K('Ctrl+Maj+J') },
         { label: 'Supprimer le calque', action: 'deleteLayer', key: 'Suppr' },
         { label: 'Renommer le calque…', action: 'renameLayer' },
         { label: 'Modifier le texte…', action: 'editText' },
         { label: 'Afficher / masquer', action: 'toggleVisible', key: K('Ctrl+,') },
         '-',
         { label: "Masque d'écrêtage", action: 'clipLayer', key: K('Ctrl+Alt+G') },
+        { label: 'Grouper les calques', action: 'groupLayers', key: K('Ctrl+G') },
+        { label: 'Dissocier les calques', action: 'ungroupLayers', key: K('Ctrl+Maj+G') },
+        '-',
+        { heading: 'Masque de fusion' },
+        { label: 'Tout faire apparaître', action: 'maskRevealAll' },
+        { label: 'Tout masquer', action: 'maskHideAll' },
+        { label: 'Faire apparaître la sélection', action: 'maskRevealSel' },
+        { label: 'Masquer la sélection', action: 'maskHideSel' },
+        { label: 'Peindre sur le masque', action: 'editMask' },
+        { label: 'Désactiver le masque', action: 'maskToggle' },
+        { label: 'Appliquer le masque', action: 'maskApply' },
+        { label: 'Supprimer le masque', action: 'maskDelete' },
         '-',
         { heading: 'Disposition' },
         { label: 'Premier plan', action: 'layerTop', key: K('Ctrl+Maj+]') },
@@ -314,6 +425,21 @@ class App {
         { label: 'Fusionner avec le calque inférieur', action: 'mergeDown', key: K('Ctrl+E') },
         { label: 'Fusionner les calques visibles', action: 'mergeVisible', key: K('Ctrl+Maj+E') },
         { label: "Aplatir l'image", action: 'flatten' },
+      ] },
+      { label: 'Sélection', items: [
+        { label: 'Tout sélectionner', action: 'selectAll', key: K('Ctrl+A') },
+        { label: 'Désélectionner', action: 'deselect', key: K('Ctrl+D') },
+        { label: 'Resélectionner', action: 'reselect', key: K('Ctrl+Maj+D') },
+        { label: 'Intervertir', action: 'invertSel', key: K('Ctrl+Maj+I') },
+        '-',
+        { label: 'Contour progressif…', action: 'featherSel', key: 'Maj+F6' },
+        { label: 'Dilater…', action: 'growSel' },
+        { label: 'Contracter…', action: 'shrinkSel' },
+        '-',
+        { label: 'Sélectionner les pixels du calque', action: 'selectLayerPixels' },
+        { label: 'Sélection depuis le masque', action: 'selectMask' },
+        '-',
+        { label: 'Effacer le contenu sélectionné', action: 'clearSel', key: 'Suppr' },
       ] },
       { label: 'Affichage', items: [
         { label: 'Zoom avant', action: 'zoomIn', key: K('Ctrl++') },
@@ -375,6 +501,8 @@ class App {
       'ctrl+0': 'fit', 'ctrl+1': 'zoom100', 'ctrl++': 'zoomIn', 'ctrl+-': 'zoomOut',
       'delete': 'deleteLayer', 'backspace': 'deleteLayer', 'f11': 'fullscreen',
       'alt+backspace': 'fillFg', 'alt+delete': 'fillFg', 'ctrl+backspace': 'fillBg', 'ctrl+delete': 'fillBg',
+      'ctrl+a': 'selectAll', 'ctrl+d': 'deselect', 'ctrl+shift+d': 'reselect', 'ctrl+shift+i': 'invertSel', 'shift+f6': 'featherSel',
+      'ctrl+t': 'freeTransform', 'ctrl+g': 'groupLayers', 'ctrl+shift+g': 'ungroupLayers', 'ctrl+x': 'cut', 'ctrl+shift+j': 'layerViaCut',
     };
     const typing = (t) => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
     document.addEventListener('keydown', (e) => {
@@ -394,19 +522,22 @@ class App {
       else k = e.key.toLowerCase();
       const ctrl = e.ctrlKey || e.metaKey;
       const combo = `${ctrl ? 'ctrl+' : ''}${e.altKey ? 'alt+' : ''}${e.shiftKey && k !== '+' ? 'shift+' : ''}${k}`;
+      // L'outil en cours d'abord (taille du pinceau, Entrée / Échap du recadrage, points du lasso…)
+      const impl = this.tools[this.tool];
+      if (impl?.key && !ctrl && impl.key(e, k)) { e.preventDefault(); return; }
+      if ((combo === 'delete' || combo === 'backspace') && this.doc?.committed.selection) {
+        e.preventDefault(); this.run('clearSel'); return;
+      }
       if (map[combo]) {
         if (k === 'f11' && !document.documentElement.requestFullscreen) return;
         e.preventDefault();
         this.run(map[combo]);
         return;
       }
-      // L'outil en cours d'abord (taille du pinceau, Entrée / Échap du recadrage…)
-      const impl = this.tools[this.tool];
-      if (impl?.key && !ctrl && impl.key(e, k)) { e.preventDefault(); return; }
       if (ctrl || e.altKey) return;
       // Outils
       if (k === 'g' && e.shiftKey) { this.setTool(this.tool === 'bucket' ? 'gradient' : 'bucket'); return; }
-      const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop' }[k];
+      const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop', m: 'marquee', l: 'lasso', w: 'wand' }[k];
       if (tool && !e.shiftKey) { this.setTool(tool); return; }
       if (k === 'x') { this.swapColors(); return; }
       if (k === 'd') { this.resetColors(); return; }
@@ -415,8 +546,7 @@ class App {
       if (arrows[k] && this.tool === 'move' && this.doc?.active) {
         e.preventDefault();
         const [dx, dy] = arrows[k].map(v => v * (e.shiftKey ? 10 : 1));
-        const d = this.doc, l = d.active;
-        this.commit('Déplacer', ops.updateLayer(d.committed, l.id, { x: l.x + dx, y: l.y + dy }), { mergeKey: `nudge:${l.id}` });
+        this.tools.move.nudge(dx, dy);
       }
     });
     document.addEventListener('keyup', (e) => {
@@ -534,8 +664,16 @@ class App {
   async copy(merged) {
     const d = this.doc;
     let c;
+    const sel = d.committed.selection;
     if (merged) c = flattenState(d.committed);
+    else if (tree.isGroup(d.active)) { const r = ops.mergeGroup(d.committed, d.activeId); c = r.state.layers.find(l => l.id === r.activeId).canvas; }
     else c = d.active.canvas;
+    if (sel) {
+      const ox = merged || tree.isGroup(d.active) ? 0 : d.active.x, oy = merged || tree.isGroup(d.active) ? 0 : d.active.y;
+      const cut = SEL.cutOut(c, ox, oy, sel);
+      if (!cut) { toast('Rien de sélectionné à copier.'); return; }
+      c = cut.canvas;
+    }
     if (!navigator.clipboard?.write || !window.ClipboardItem) { toast('Copie d\'image non disponible dans ce navigateur.'); return; }
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasToBlob(c, 'image/png') })]);
@@ -545,13 +683,110 @@ class App {
     }
   }
 
+  /** Remplit (ou efface, color = null) le calque ou son masque, limité à la sélection. */
   fillLayer(color, label) {
     const d = this.doc, L = d.active;
     if (!L.visible) { toast('Ce calque est masqué.'); return; }
-    commitPixels(this, label, L.id, { x: 0, y: 0, w: d.width, h: d.height }, (ctx, layer) => {
-      if (color) { ctx.fillStyle = color; ctx.fillRect(-layer.x, -layer.y, d.width, d.height); }
-      else ctx.clearRect(-layer.x, -layer.y, d.width, d.height);
-    });
+    const P = prepareTarget(d, L.id);
+    if (!P) { toast('Choisissez un calque, pas un groupe.'); return; }
+    const sel = d.committed.selection;
+    const area = sel ? SEL.selBounds(sel) : { x: 0, y: 0, w: d.width, h: d.height };
+    commitPixels(this, label, L.id, area, (ctx, T, r) => {
+      const si = selIn(T);
+      const cov = newCanvas(r.w, r.h); // zone couverte
+      const cctx = ctxOf(cov);
+      cctx.fillRect(0, 0, r.w, r.h);
+      if (si) { cctx.globalCompositeOperation = 'destination-in'; cctx.drawImage(si.canvas, si.ox - r.x, si.oy - r.y); }
+      if (T.target === 'mask') applyBuf(ctx, cov, 0, 0, r.x, r.y, r.w, r.h, { alpha: 1, lum: color ? lumOf(color) : 1 });
+      else if (!color) applyBuf(ctx, cov, 0, 0, r.x, r.y, r.w, r.h, { alpha: 1, op: 'destination-out' });
+      else { cctx.globalCompositeOperation = 'source-in'; cctx.fillStyle = color; cctx.fillRect(0, 0, r.w, r.h); applyBuf(ctx, cov, 0, 0, r.x, r.y, r.w, r.h, { alpha: 1, op: 'source-over' }); }
+      cov.width = 0;
+    }, P);
+  }
+
+  canMove(dir) {
+    const d = this.doc, l = d?.active;
+    if (!l) return false;
+    const sibs = tree.siblingsOf(d.layers, l);
+    const i = sibs.indexOf(l);
+    return dir > 0 ? i < sibs.length - 1 : i > 0;
+  }
+
+  /** Sélection d'un calque dans le panneau ('single', 'toggle', 'range'). */
+  selectLayer(id, how = 'single') {
+    const d = this.doc; if (!d || !id) return;
+    if (how === 'single' && d.activeId === id && d.selIds.size === 1 && d.selIds.has(id)) return; // déjà choisi
+    if (how === 'toggle') {
+      if (d.selIds.has(id) && d.selIds.size > 1) { d.selIds.delete(id); if (d.activeId === id) d.activeId = [...d.selIds].at(-1); }
+      else { d.selIds.add(id); d.activeId = id; }
+    } else if (how === 'range' && d.activeId) {
+      const order = [...document.querySelectorAll('#layers-list .layer-row')].map(r => r.dataset.id);
+      const a = order.indexOf(d.activeId), b = order.indexOf(id);
+      if (a >= 0 && b >= 0) { d.selIds = new Set(order.slice(Math.min(a, b), Math.max(a, b) + 1)); d.activeId = id; }
+    } else { d.selIds = new Set([id]); d.activeId = id; }
+    const L = d.active;
+    if (!L?.mask) d.target = 'layer';
+    this.refresh({ history: false });
+  }
+
+  setSelection(sel, label) {
+    const d = this.doc;
+    if (!sel && !d.committed.selection) return;
+    this.commit(label, { ...d.committed, selection: sel || null });
+  }
+
+  /** Nouveau calque à partir de la sélection (copie ou coupe). */
+  layerFromSelection(cutToo) {
+    const d = this.doc, L = d.active, sel = d.committed.selection;
+    if (!L?.canvas || tree.isGroup(L)) { toast('Choisissez un calque.'); return; }
+    const piece = SEL.cutOut(L.canvas, L.x, L.y, sel);
+    if (!piece) { toast('Rien de sélectionné sur ce calque.'); return; }
+    const nl = mkLayer({ name: cutToo ? `${L.name} (coupé)` : `${L.name} (copie)`, canvas: piece.canvas, x: piece.x, y: piece.y });
+    if (cutToo) {
+      this.fillLayer(null, 'Couper');
+      this.commit('Calque par coupe', ops.insertLayer(d.committed, nl, L.id), { activeId: nl.id });
+    } else this.commit('Calque par copie', ops.insertLayer(d.committed, nl, L.id), { activeId: nl.id });
+    this.selectLayer(nl.id);
+  }
+
+  addMask(kind) {
+    const d = this.doc, L = d.active, st = d.committed;
+    const W = st.width, H = st.height;
+    const c = newCanvas(W, H);
+    const ctx = ctxOf(c);
+    const sel = st.selection;
+    let def = 255;
+    if (kind === 'reveal') ctx.fillRect(0, 0, W, H);
+    else if (kind === 'hide') def = 0;
+    else if (kind === 'revealSel') { ctx.drawImage(sel.canvas, sel.x, sel.y); def = 0; }
+    else if (kind === 'hideSel') { ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'destination-out'; ctx.drawImage(sel.canvas, sel.x, sel.y); }
+    const label = { reveal: 'Masque : tout faire apparaître', hide: 'Masque : tout masquer', revealSel: 'Masque : faire apparaître la sélection', hideSel: 'Masque : masquer la sélection' }[kind];
+    d.target = 'mask';
+    this.commit(label, { ...ops.updateLayer(st, L.id, { mask: { canvas: c, x: 0, y: 0, def, disabled: false } }), selection: kind.endsWith('Sel') ? null : st.selection });
+    toast('Masque ajouté : peignez en noir pour masquer, en blanc pour révéler.');
+  }
+
+  async dialogSelAmount(title, label, def, fn) {
+    const input = el('input', { type: 'number', min: 1, max: 500, value: def, inputmode: 'numeric' });
+    const v = await openDialog({ title, body: el('div', { class: 'form' }, field(label, input)), onSubmit: () => +input.value });
+    if (!v || v <= 0) return;
+    const d = this.doc;
+    const sel = await this.withBusy('Calcul…', () => fn(d.committed.selection, v));
+    this.setSelection(SEL.clipSelToDoc(sel, d.width, d.height), title);
+  }
+
+  // ——— Transformation manuelle ———
+  startTransform() {
+    if (!this.doc || this.tool === 'transform') return;
+    if (!this.tools.transform.begin()) return;
+    this.prevTool = this.tool;
+    this.tools[this.tool]?.deactivate?.();
+    this.tool = 'transform';
+    renderOptions(this); renderToolbar(this); this.view.updateCursor();
+  }
+  endTransform() {
+    this.tool = this.prevTool && this.prevTool !== 'transform' ? this.prevTool : 'move';
+    renderOptions(this); renderToolbar(this); this.view.updateCursor();
   }
 
   async savePsd() {
@@ -745,6 +980,14 @@ class App {
       ['Opacité du pinceau', '1 … 9, 0 = 100 %'],
       ['Trait droit', 'Maj+clic'],
       ['Inverser les couleurs / noir et blanc', 'X · D'],
+      ['Sélection rectangle-ellipse / lasso / baguette', 'M · L · W (Maj+M, Maj+L : variante)'],
+      ['Ajouter / soustraire / intersection', 'Maj · Alt · Maj+Alt au début du tracé'],
+      ['Tout sélectionner / désélectionner / resélectionner', K('Ctrl+A · Ctrl+D · Ctrl+Maj+D')],
+      ['Intervertir la sélection / contour progressif', K('Ctrl+Maj+I · Maj+F6')],
+      ['Calque par copie / par coupe', K('Ctrl+J · Ctrl+Maj+J')],
+      ['Transformation manuelle', K('Ctrl+T (Entrée / Échap)')],
+      ['Grouper / dissocier', K('Ctrl+G · Ctrl+Maj+G')],
+      ['Sélection multiple de calques', K('Ctrl+clic · Maj+clic (appui long au doigt)')],
       ['Remplir premier plan / arrière-plan', K('Alt+Retour arrière · Ctrl+Retour arrière')],
       ['Main temporaire', 'Espace (maintenu) ou clic molette'],
       ['Choisir le calque sous la souris', `${MOD}+clic avec Déplacer`],
@@ -761,7 +1004,7 @@ class App {
       el('img', { src: 'icons/sceau-enluminure.svg', alt: '', width: 120, height: 120 }),
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
-      el('p', { class: 'muted' }, 'Étape 2 — outils de base : pinceau, gomme, pipette, pot de peinture, dégradé, formes, texte, recadrage.'),
+      el('p', { class: 'muted' }, 'Étape 3 — sélections, masques de calque, transformation manuelle et groupes de calques.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }

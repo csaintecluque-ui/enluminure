@@ -2,7 +2,8 @@
 import { el, BLENDS, blendSupported, fmtBytes, clamp } from './util.js';
 import { icon } from './icons.js';
 import { $ } from './ui.js';
-import { updateLayer, moveLayerTo } from './ops.js';
+import { updateLayer } from './ops.js';
+import { buildTree, isGroup, descendants, placeRelative } from './tree.js';
 
 // ——— Vignettes des calques (mises en cache : les toiles ne changent jamais) ———
 const thumbCache = new WeakMap();
@@ -38,6 +39,7 @@ function thumbFor(layer, W, H) {
 // ——— Panneau Calques ———
 export function initLayersPanel(app) {
   const blend = $('#layer-blend');
+  blend.append(el('option', { value: 'pass through', 'data-ok': '1', 'data-group': '1' }, 'Transfert'));
   for (const b of BLENDS) {
     if (b === '-') { blend.append(el('option', { disabled: true }, '──────────')); continue; }
     const [val, label, op] = b;
@@ -71,12 +73,14 @@ export function initLayersPanel(app) {
   const foot = $('#layers-foot');
   const btns = [
     ['newLayer', 'newLayer', 'Nouveau calque (Ctrl+Maj+N)'],
-    ['duplicateLayer', 'duplicate', 'Dupliquer le calque (Ctrl+J)'],
-    ['layerUp', 'up', 'Monter le calque (Ctrl+])'],
-    ['layerDown', 'down', 'Descendre le calque (Ctrl+[)'],
+    ['newGroup', 'folder', 'Nouveau groupe (Ctrl+G : grouper la sélection)'],
+    ['maskReveal', 'mask', 'Ajouter un masque de fusion (depuis la sélection s\'il y en a une)'],
+    ['duplicateLayer', 'duplicate', 'Dupliquer (Ctrl+J)'],
+    ['layerUp', 'up', 'Monter (Ctrl+])'],
+    ['layerDown', 'down', 'Descendre (Ctrl+[)'],
     ['clipLayer', 'clip', "Masque d'écrêtage (Ctrl+Alt+G)"],
-    ['mergeDown', 'merge', 'Fusionner avec le calque inférieur (Ctrl+E)'],
-    ['deleteLayer', 'trash', 'Supprimer le calque'],
+    ['mergeDown', 'merge', 'Fusionner vers le bas / fusionner le groupe (Ctrl+E)'],
+    ['deleteLayer', 'trash', 'Supprimer'],
   ];
   for (const [action, ic, title] of btns) {
     const b = el('button', { type: 'button', class: 'icon-btn', title, 'aria-label': title, 'data-action': action, html: icon(ic) });
@@ -85,6 +89,31 @@ export function initLayersPanel(app) {
   }
 }
 
+// Vignette d'un masque : blanc = visible, noir = masqué
+const maskThumbCache = new WeakMap();
+function maskThumb(m, W, H) {
+  const key = `${m.x},${m.y},${W},${H},${m.def},${m.canvas._v || 0}`;
+  const hit = maskThumbCache.get(m.canvas);
+  if (hit && hit.key === key) return hit.canvas;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const size = Math.round(TH * dpr);
+  const t = document.createElement('canvas'); t.width = t.height = size;
+  const ctx = t.getContext('2d');
+  const s = Math.min(size / W, size / H);
+  const fw = W * s, fh = H * s, ox = (size - fw) / 2, oy = (size - fh) / 2;
+  ctx.fillStyle = '#222'; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = m.def ? '#fff' : '#000'; ctx.fillRect(ox, oy, fw, fh);
+  ctx.fillStyle = '#000'; ctx.fillRect(ox + m.x * s, oy + m.y * s, m.canvas.width * s, m.canvas.height * s);
+  const w2 = document.createElement('canvas'); w2.width = w2.height = size;
+  const c2 = w2.getContext('2d');
+  c2.drawImage(m.canvas, ox + m.x * s, oy + m.y * s, m.canvas.width * s, m.canvas.height * s);
+  c2.globalCompositeOperation = 'source-in'; c2.fillStyle = '#fff'; c2.fillRect(0, 0, size, size);
+  ctx.save(); ctx.beginPath(); ctx.rect(ox, oy, fw, fh); ctx.clip(); ctx.drawImage(w2, 0, 0); ctx.restore();
+  maskThumbCache.set(m.canvas, { key, canvas: t });
+  return t;
+}
+const thumbEl = (t, cls) => { const c = el('canvas', { class: cls, width: t ? t.width : TH, height: t ? t.height : TH }); if (t) c.getContext('2d').drawImage(t, 0, 0); return c; };
+
 export function renderLayers(app) {
   const d = app.doc;
   const list = $('#layers-list');
@@ -92,8 +121,13 @@ export function renderLayers(app) {
   const L = d?.active;
   blend.disabled = range.disabled = num.disabled = !L;
   if (L) {
+    const grp = isGroup(L);
+    for (const o of blend.options) {
+      if (!o.value) continue;
+      o.hidden = o.dataset.group === '1' && !grp;
+      o.disabled = (o.dataset.ok !== '1' && o.value !== L.blend) || o.hidden;
+    }
     blend.value = L.blend;
-    for (const o of blend.options) if (o.value) o.disabled = o.dataset.ok !== '1' && o.value !== L.blend;
     if (document.activeElement !== num) num.value = Math.round(L.opacity * 100);
     range.value = Math.round(L.opacity * 100);
   }
@@ -105,32 +139,85 @@ export function renderLayers(app) {
   list.textContent = '';
   if (!d) { list.append(el('div', { class: 'empty' }, 'Aucun document ouvert')); return; }
   const layers = d.state.layers;
-  for (let i = layers.length - 1; i >= 0; i--) {
-    const l = layers[i];
-    const t = thumbFor(l, d.width, d.height);
-    const thumb = el('canvas', { class: 'thumb', width: t ? t.width : TH, height: t ? t.height : TH });
-    if (t) thumb.getContext('2d').drawImage(t, 0, 0);
-    const eye = el('button', { type: 'button', class: 'eye', title: l.visible ? 'Masquer' : 'Afficher', html: icon(l.visible ? 'eye' : 'eyeOff', 16) });
-    const name = el('span', { class: 'lname' }, l.name);
-    const grip = el('span', { class: 'grip', title: 'Glisser pour réorganiser', html: icon('grip', 16) });
-    const row = el('div', {
-      class: `layer-row ${l.id === d.activeId ? 'active' : ''} ${l.visible ? '' : 'hidden-layer'} ${l.clipping && i > 0 ? 'clipped' : ''}`,
-      'data-id': l.id,
-    }, eye, l.clipping && i > 0 ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, l.text ? el('span', { class: 'text-badge', title: 'Calque de texte (outil Texte pour le modifier)' }, 'T') : null, el('div', { class: 'lmeta' }, name,
-      (l.blend !== 'normal' || l.opacity < 1) ? el('small', {}, `${blendLabel(l.blend)}${l.opacity < 1 ? ` · ${Math.round(l.opacity * 100)} %` : ''}`) : null), grip);
+  d.collapsed = d.collapsed || new Set();
+  const rows = [];
+  const walk = (nodes, depth, hiddenParent) => {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      rows.push({ l: n.layer, depth, clipped: n.layer.clipping && i > 0, dim: hiddenParent });
+      if (n.children && !d.collapsed.has(n.layer.id)) walk(n.children, depth + 1, hiddenParent || !n.layer.visible);
+    }
+  };
+  walk(buildTree(layers), 0, false);
+  for (const { l, depth, clipped, dim } of rows) list.append(layerRow(app, d, l, depth, clipped, dim));
+}
 
-    eye.addEventListener('click', (e) => {
-      e.stopPropagation();
-      app.commit(l.visible ? 'Masquer le calque' : 'Afficher le calque', updateLayer(d.committed, l.id, { visible: !l.visible }));
-    });
-    row.addEventListener('click', () => { if (d.activeId !== l.id) { d.setActive(l.id); app.refresh({ history: false }); } });
-    name.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(app, row, l); });
-    grip.addEventListener('pointerdown', (e) => startDrag(app, e, row, l));
-    list.append(row);
+function layerRow(app, d, l, depth, clipped, dim) {
+  const group = isGroup(l);
+  const eye = el('button', { type: 'button', class: 'eye', title: l.visible ? 'Masquer' : 'Afficher', html: icon(l.visible ? 'eye' : 'eyeOff', 16) });
+  const name = el('span', { class: 'lname' }, l.name);
+  const grip = el('span', { class: 'grip', title: 'Glisser pour réorganiser', html: icon('grip', 16) });
+  const onMask = d.target === 'mask' && l.id === d.activeId;
+  let twisty = null, thumb, mthumb = null;
+  if (group) {
+    const open = !d.collapsed.has(l.id);
+    twisty = el('button', { type: 'button', class: 'twisty', title: open ? 'Replier' : 'Déplier', html: open ? '▾' : '▸' });
+    twisty.addEventListener('click', (e) => { e.stopPropagation(); if (open) d.collapsed.add(l.id); else d.collapsed.delete(l.id); app.refresh({ history: false }); });
+    thumb = el('span', { class: `thumb folder ${!onMask && l.id === d.activeId ? 'target' : ''}`, html: icon('folder', 22) });
+  } else {
+    thumb = thumbEl(thumbFor(l, d.width, d.height), `thumb ${!onMask && l.id === d.activeId && l.mask ? 'target' : ''}`);
   }
+  if (l.mask) {
+    mthumb = thumbEl(maskThumb(l.mask, d.width, d.height), `thumb mask-thumb ${onMask ? 'target' : ''} ${l.mask.disabled ? 'disabled' : ''}`);
+    mthumb.title = 'Masque de fusion — clic : peindre dessus · Maj+clic : désactiver · Ctrl+clic : sélection';
+    mthumb.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (e.shiftKey) { app.selectLayer(l.id); app.run('maskToggle'); return; }
+      if (e.ctrlKey || e.metaKey) { app.selectLayer(l.id); app.run('selectMask'); return; }
+      const was = d.target;
+      app.selectLayer(l.id); d.target = 'mask';
+      if (was !== 'mask') app.refresh({ history: false });
+    });
+  }
+  thumb.title = thumb.title || (group ? 'Groupe' : 'Calque — Ctrl+clic : sélectionner ses pixels');
+  thumb.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if ((e.ctrlKey || e.metaKey) && !group) { app.selectLayer(l.id); app.run('selectLayerPixels'); return; }
+    const wasMask = d.target === 'mask';
+    app.selectLayer(l.id); d.target = 'layer';
+    if (wasMask) app.refresh({ history: false });
+  });
+  const selected = d.selIds.has(l.id) || l.id === d.activeId;
+  const row = el('div', {
+    class: `layer-row ${l.id === d.activeId ? 'active' : selected ? 'selected' : ''} ${l.visible && !dim ? '' : 'hidden-layer'} ${clipped ? 'clipped' : ''} ${group ? 'group-row' : ''}`,
+    'data-id': l.id, style: `padding-left:${2 + depth * 16}px`,
+  }, eye, twisty, clipped ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, mthumb,
+  l.text ? el('span', { class: 'text-badge', title: 'Calque de texte (outil Texte pour le modifier)' }, 'T') : null,
+  el('div', { class: 'lmeta' }, name,
+    (l.blend !== 'normal' && l.blend !== 'pass through') || l.opacity < 1 ? el('small', {}, `${blendLabel(l.blend)}${l.opacity < 1 ? ` · ${Math.round(l.opacity * 100)} %` : ''}`) : null), grip);
+
+  eye.addEventListener('click', (e) => {
+    e.stopPropagation();
+    app.commit(l.visible ? 'Masquer le calque' : 'Afficher le calque', updateLayer(d.committed, l.id, { visible: !l.visible }));
+  });
+  row.addEventListener('click', (e) => {
+    if (row._longPressed) { row._longPressed = false; return; }
+    app.selectLayer(l.id, e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : 'single');
+  });
+  // appui long (écran tactile) : ajouter / retirer de la sélection multiple
+  let lp = 0;
+  row.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    lp = setTimeout(() => { row._longPressed = true; app.selectLayer(l.id, 'toggle'); navigator.vibrate?.(15); }, 480);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'pointermove']) row.addEventListener(ev, (e) => { if (ev !== 'pointermove' || Math.abs(e.movementY) > 3) clearTimeout(lp); });
+  name.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(app, row, l); });
+  grip.addEventListener('pointerdown', (e) => startDrag(app, e, row, l));
+  return row;
 }
 
 function blendLabel(v) {
+  if (v === 'pass through') return 'Transfert';
   const b = BLENDS.find(x => Array.isArray(x) && x[0] === v);
   return b ? b[1] : v;
 }
@@ -162,31 +249,44 @@ function startDrag(app, e, row, l) {
   e.preventDefault(); e.stopPropagation();
   const d = app.doc;
   const list = $('#layers-list');
-  const rows = [...list.children];
+  // lignes qui peuvent recevoir (pas la ligne déplacée ni le contenu d'un groupe déplacé)
+  const banned = descendants(d.state.layers, l.id); banned.add(l.id);
+  const rows = [...list.children].filter(r => r.classList.contains('layer-row') && !banned.has(r.dataset.id));
   const startY = e.clientY;
-  const rect = row.getBoundingClientRect();
-  const from0 = rows.indexOf(row);
-  const mids = rows.map(r => { const b = r.getBoundingClientRect(); return b.top + b.height / 2; });
   const scroll0 = list.scrollTop;
+  const rects = rows.map(r => r.getBoundingClientRect());
   const marker = el('div', { class: 'drop-marker' });
   let target = null;
   row.classList.add('dragging');
   const grip = e.currentTarget;
   try { grip.setPointerCapture(e.pointerId); } catch {}
+  const clearHi = () => list.querySelectorAll('.drop-into').forEach(x => x.classList.remove('drop-into'));
   const move = (ev) => {
-    const dy = ev.clientY - startY;
-    row.style.transform = `translateY(${dy}px)`;
-    // position d'insertion (dans l'ordre affiché, haut = dessus de la pile)
-    let pos = rows.length;
+    row.style.transform = `translateY(${ev.clientY - startY}px)`;
     const ds = list.scrollTop - scroll0;
+    const y = ev.clientY + ds;
+    target = null;
     for (let k = 0; k < rows.length; k++) {
-      if (k === from0) continue; // la ligne déplacée suit le doigt : on l'ignore
-      if (ev.clientY < mids[k] - ds) { pos = k; break; }
+      const r = rects[k];
+      if (y < r.top || y > r.bottom) continue;
+      const f = (y - r.top) / r.height;
+      const grp = rows[k].classList.contains('group-row');
+      const where = grp ? (f < 0.3 ? 'above' : f > 0.7 ? 'below' : 'inside') : (f < 0.5 ? 'above' : 'below');
+      target = { id: rows[k].dataset.id, where, el: rows[k] };
+      break;
     }
-    target = pos;
-    const ref = rows[pos];
-    if (ref) list.insertBefore(marker, ref); else list.append(marker);
-    // défilement automatique
+    if (!target && rows.length) {
+      if (y < rects[0].top) target = { id: rows[0].dataset.id, where: 'above', el: rows[0] };
+      else if (y > rects[rects.length - 1].bottom) target = { id: rows.at(-1).dataset.id, where: 'below', el: rows.at(-1) };
+    }
+    clearHi(); marker.remove();
+    if (target) {
+      if (target.where === 'inside') target.el.classList.add('drop-into');
+      else {
+        marker.style.marginLeft = target.el.style.paddingLeft;
+        if (target.where === 'above') list.insertBefore(marker, target.el); else target.el.after(marker);
+      }
+    }
     const lr = list.getBoundingClientRect();
     if (ev.clientY < lr.top + 20) list.scrollTop -= 8;
     if (ev.clientY > lr.bottom - 20) list.scrollTop += 8;
@@ -195,21 +295,17 @@ function startDrag(app, e, row, l) {
     grip.removeEventListener('pointermove', move);
     grip.removeEventListener('pointerup', up);
     grip.removeEventListener('pointercancel', up);
-    marker.remove();
+    marker.remove(); clearHi();
     row.style.transform = '';
     row.classList.remove('dragging');
-    if (target == null) return;
-    const n = d.state.layers.length;
-    const from = rows.indexOf(row); // index affiché
-    let toDisplay = target > from ? target - 1 : target;
-    if (toDisplay === from) return;
-    const toStack = n - 1 - toDisplay;
-    app.commit('Ordre des calques', moveLayerTo(d.committed, l.id, toStack));
+    if (!target) return;
+    const st = placeRelative(d.committed, l.id, target.id, target.where);
+    if (st !== d.committed) app.commit('Ordre des calques', st);
+    if (target.where === 'inside') { d.collapsed?.delete(target.id); app.refresh({ history: false }); }
   };
   grip.addEventListener('pointermove', move);
   grip.addEventListener('pointerup', up);
   grip.addEventListener('pointercancel', up);
-  void rect;
 }
 
 // ——— Panneau Historique ———
@@ -248,9 +344,9 @@ export function renderTabs(app) {
 // ——— Boîte à outils ———
 export const TOOLS = [
   { id: 'move', icon: 'move', label: 'Déplacer', key: 'V' },
-  { id: 'marquee', icon: 'marquee', label: 'Rectangle de sélection', key: 'M', step: 3 },
-  { id: 'lasso', icon: 'lasso', label: 'Lasso', key: 'L', step: 3 },
-  { id: 'wand', icon: 'wand', label: 'Baguette magique', key: 'W', step: 3 },
+  { id: 'marquee', icon: 'marquee', label: 'Rectangle / ellipse de sélection', key: 'M' },
+  { id: 'lasso', icon: 'lasso', label: 'Lasso', key: 'L' },
+  { id: 'wand', icon: 'wand', label: 'Baguette magique', key: 'W' },
   { id: 'crop', icon: 'crop', label: 'Recadrage', key: 'C' },
   { id: 'eyedropper', icon: 'eyedropper', label: 'Pipette', key: 'I' },
   '-',
@@ -308,7 +404,7 @@ export function renderToolbar(app) {
 export function renderOptions(app) {
   const bar = $('#optionsbar');
   bar.textContent = '';
-  const t = TOOLS.find(x => x.id === app.tool);
+  const t = TOOLS.find(x => x.id === app.tool) || { icon: 'fit', label: 'Transformation manuelle' };
   bar.append(el('span', { class: 'opt-tool', html: icon(t.icon, 16) }, el('b', {}, t.label)));
   const check = (key, label) => {
     const i = el('input', { type: 'checkbox', checked: app.opts[key] });
@@ -320,10 +416,7 @@ export function renderOptions(app) {
     b.addEventListener('click', () => app.run(action));
     return b;
   };
-  if (app.tool === 'move') {
-    bar.append(check('autoSelect', 'Sélection auto du calque'), check('showBounds', 'Afficher les bords'));
-    bar.append(el('span', { class: 'opt-hint' }, 'Flèches : décaler de 1 px (Maj : 10 px)'));
-  } else if (app.tool === 'hand') {
+  if (app.tool === 'hand') {
     bar.append(btn('100 %', 'zoom100'), btn("Taille de l'écran", 'fit'));
   } else if (app.tools[app.tool]) {
     app.tools[app.tool].options(bar);

@@ -2,6 +2,8 @@
 import { newCanvas, ctxOf, bump, clamp, freeCanvas } from './util.js';
 import { layerRect, unionRect } from './render.js';
 import { updateLayer } from './ops.js';
+import { isGroup } from './tree.js';
+import { applyBuf } from './document.js';
 
 // ——— Couleurs ———
 export function hexToRgb(hex) {
@@ -11,6 +13,8 @@ export function hexToRgb(hex) {
 }
 export const rgbToHex = (r, g, b) => `#${[r, g, b].map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('')}`;
 export const rgba = (hex, a) => { const [r, g, b] = hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; };
+/** Luminosité 0..1 d'une couleur (pour peindre sur un masque : noir masque, blanc révèle). */
+export const lumOf = (hex) => { const [r, g, b] = hexToRgb(hex); return (0.299 * r + 0.587 * g + 0.114 * b) / 255; };
 
 export function copyRect(src, x, y, w, h) {
   const c = newCanvas(w, h);
@@ -41,22 +45,71 @@ export function ensurePaintable(doc, layerId) {
     layer = { ...layer, text: null };
     state = updateLayer(state, L.id, { text: null });
   }
-  return { state, layer };
+  return { state, layer, canvas: layer.canvas, ox: layer.x, oy: layer.y, target: 'layer' };
 }
 
-/** Modifie les pixels d'un calque et enregistre l'étape avec une rustine (zone avant / après). */
+/** Même chose pour le masque d'un calque ou d'un groupe. */
+export function ensureMaskPaintable(doc, layerId) {
+  const st = doc.committed;
+  const L = st.layers.find(l => l.id === layerId);
+  const m = L.mask;
+  let shared = false;
+  for (const e of doc.entries) for (const l of e.state.layers) if (l.mask?.canvas === m.canvas && l.id !== L.id) shared = true;
+  const r = { x: m.x, y: m.y, w: m.canvas.width, h: m.canvas.height };
+  const covers = r.x <= 0 && r.y <= 0 && r.x + r.w >= st.width && r.y + r.h >= st.height;
+  let state = st, mask = m;
+  if (shared || !covers) {
+    const u = covers ? r : unionRect(r, { x: 0, y: 0, w: st.width, h: st.height });
+    const c = newCanvas(u.w, u.h);
+    const ctx = ctxOf(c);
+    if (m.def) { ctx.fillRect(0, 0, u.w, u.h); ctx.clearRect(r.x - u.x, r.y - u.y, r.w, r.h); }
+    ctx.drawImage(m.canvas, r.x - u.x, r.y - u.y);
+    mask = { ...m, canvas: c, x: u.x, y: u.y };
+    state = updateLayer(st, L.id, { mask });
+  }
+  const layer = state.layers.find(l => l.id === L.id);
+  return { state, layer, canvas: mask.canvas, ox: mask.x, oy: mask.y, target: 'mask' };
+}
+
+/** Cible des outils de peinture : le masque si on l'a choisi, sinon les pixels du calque. */
+export function prepareTarget(doc, layerId) {
+  const L = doc.committed.layers.find(l => l.id === layerId);
+  if (!L) return null;
+  if (doc.target === 'mask' && L.mask) return ensureMaskPaintable(doc, layerId);
+  if (isGroup(L)) return null;
+  return ensurePaintable(doc, layerId);
+}
+
+/** Sélection exprimée dans les coordonnées de la toile cible (ou null). */
+export function selIn(prepared) {
+  const sel = prepared.state.selection;
+  return sel ? { canvas: sel.canvas, ox: sel.x - prepared.ox, oy: sel.y - prepared.oy } : null;
+}
+
+/** Copie d'une zone d'une toile, limitée à la sélection. */
+export function maskedRegion(src, r, sel) {
+  const t = newCanvas(r.w, r.h);
+  const ctx = ctxOf(t);
+  ctx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  if (sel) { ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(sel.canvas, sel.ox - r.x, sel.oy - r.y); }
+  return t;
+}
+
+/** Modifie les pixels d'un calque (ou de son masque) et enregistre l'étape avec une rustine (zone avant / après). */
 export function commitPixels(app, label, layerId, docRect, draw, prepared) {
   const doc = app.doc;
-  const { state, layer } = prepared || ensurePaintable(doc, layerId);
-  const c = layer.canvas;
-  const x = clamp(Math.floor(docRect.x - layer.x), 0, c.width), y = clamp(Math.floor(docRect.y - layer.y), 0, c.height);
-  const x2 = clamp(Math.ceil(docRect.x + docRect.w - layer.x), 0, c.width), y2 = clamp(Math.ceil(docRect.y + docRect.h - layer.y), 0, c.height);
+  const P = prepared || prepareTarget(doc, layerId);
+  if (!P) return false;
+  const { state } = P;
+  const c = P.canvas;
+  const x = clamp(Math.floor(docRect.x - P.ox), 0, c.width), y = clamp(Math.floor(docRect.y - P.oy), 0, c.height);
+  const x2 = clamp(Math.ceil(docRect.x + docRect.w - P.ox), 0, c.width), y2 = clamp(Math.ceil(docRect.y + docRect.h - P.oy), 0, c.height);
   const w = x2 - x, h = y2 - y;
   if (w <= 0 || h <= 0) { doc.cancelPreview(); app.refresh({ history: false }); return false; }
   const before = copyRect(c, x, y, w, h);
   const ctx = ctxOf(c);
   ctx.save();
-  draw(ctx, layer, { x, y, w, h });
+  draw(ctx, P, { x, y, w, h });
   ctx.restore();
   const after = copyRect(c, x, y, w, h);
   bump(c);
@@ -103,19 +156,26 @@ export class Stroke {
   constructor(app, prepared, o) {
     this.app = app;
     this.doc = app.doc;
+    this.P = prepared;
     this.state = prepared.state;
     this.L = prepared.layer;
     this.o = o;
-    const c = this.L.canvas;
+    const c = prepared.canvas;
+    this.ox = prepared.ox; this.oy = prepared.oy;
     this.buf = newCanvas(c.width, c.height);
     this.bctx = ctxOf(this.buf);
-    this.stamp = makeStamp(o.size, o.hardness, o.erase ? '#000000' : o.color);
+    const onMask = prepared.target === 'mask';
+    this.stamp = makeStamp(o.size, o.hardness, o.erase || onMask ? '#000000' : o.color);
     this.last = null;
     this.carry = 0;
     this.bounds = null;
     this.frame = null;
     if (this.state !== this.doc.committed) this.doc.setPreview(this.state);
-    this.live = { layerId: this.L.id, buf: this.buf, op: o.erase ? 'destination-out' : 'source-over', alpha: o.opacity, dirty: null };
+    this.live = {
+      layerId: this.L.id, buf: this.buf, target: prepared.target, sel: selIn(prepared),
+      op: o.erase ? 'destination-out' : 'source-over', alpha: o.opacity, dirty: null,
+      lum: onMask ? (o.erase ? lumOf(o.bg) : lumOf(o.color)) : null,
+    };
     this.doc.setLive(this.live);
   }
 
@@ -136,7 +196,7 @@ export class Stroke {
 
   /** Ajoute un point (coordonnées du document, pression 0..1). */
   point(px, py, pressure = 1) {
-    const x = px - this.L.x, y = py - this.L.y;
+    const x = px - this.ox, y = py - this.oy;
     const p = pressure;
     if (!this.last) { this.dab(x, y, p); this.last = { x, y, p }; this.carry = 0; return; }
     const L = this.last;
@@ -159,20 +219,22 @@ export class Stroke {
     this.frame = null;
     const lv = this.live;
     lv.dirty = lv.dirty ? unionRect(lv.dirty, f) : f;
-    this.doc.invalidateRect({ x: f.x + this.L.x, y: f.y + this.L.y, w: f.w, h: f.h });
+    this.doc.invalidateRect({ x: f.x + this.ox, y: f.y + this.oy, w: f.w, h: f.h });
   }
 
   end(label) {
     const doc = this.doc;
     if (doc.live !== this.live) { freeCanvas(this.buf); return; } // annulé entre-temps
     const b = this.bounds;
-    const buf = this.buf, o = this.o;
+    const buf = this.buf, lv = this.live;
     if (!b) { doc.cancelPreview(); freeCanvas(buf); return; }
-    commitPixels(this.app, label, this.L.id, { x: b.x + this.L.x, y: b.y + this.L.y, w: b.w, h: b.h }, (ctx, layer, r) => {
-      ctx.globalAlpha = o.opacity;
-      ctx.globalCompositeOperation = o.erase ? 'destination-out' : 'source-over';
-      ctx.drawImage(buf, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
-    }, { state: this.state, layer: this.L });
+    commitPixels(this.app, label, this.L.id, { x: b.x + this.ox, y: b.y + this.oy, w: b.w, h: b.h }, (ctx, P, r) => {
+      if (lv.sel) {
+        const t = maskedRegion(buf, r, lv.sel);
+        applyBuf(ctx, t, 0, 0, r.x, r.y, r.w, r.h, lv);
+        freeCanvas(t);
+      } else applyBuf(ctx, buf, r.x, r.y, r.x, r.y, r.w, r.h, lv);
+    }, this.P);
     freeCanvas(buf);
   }
 

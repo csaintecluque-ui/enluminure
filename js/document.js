@@ -1,6 +1,6 @@
 // Enluminure — document, historique (annuler / rétablir) et gestion mémoire
 import { uid, freeCanvas, LIMITS, newCanvas, bump } from './util.js';
-import { drawStack } from './render.js';
+import { drawStack, ScratchPool } from './render.js';
 
 /**
  * Un état = { width, height, layers: [calques du bas vers le haut] }.
@@ -27,8 +27,12 @@ export class Doc {
     this._comp = null;
     this._compDirty = true;
     this._dirtyRect = null;
-    this._scratch = null;
+    this._pool = new ScratchPool();
     this._liveScratch = null;
+    this._liveTmp = null;
+    this.target = 'layer'; // 'layer' ou 'mask' : ce que les outils de peinture modifient
+    this.selIds = new Set(); // calques sélectionnés dans le panneau (sélection multiple)
+    this.lastSelection = null;
     this.view = { zoom: 1, panX: 0, panY: 0, ready: false };
   }
 
@@ -124,9 +128,14 @@ export class Doc {
   }
 
   _canvasesOf(state, set = new Set()) {
-    for (const l of state.layers) if (l.canvas) set.add(l.canvas);
+    for (const l of state.layers) {
+      if (l.canvas) set.add(l.canvas);
+      if (l.mask?.canvas) set.add(l.mask.canvas);
+    }
+    if (state.selection?.canvas) set.add(state.selection.canvas);
     return set;
   }
+  get selection() { return this.state.selection || null; }
 
   /** Mémoire occupée par l'historique (pixels uniques + rustines). */
   memoryBytes() {
@@ -159,19 +168,20 @@ export class Doc {
     if (!candidateStates.length) return;
     const keep = new Set();
     for (const e of this.entries) this._canvasesOf(e.state, keep);
-    for (const st of candidateStates) for (const l of st.layers) {
-      if (l.canvas && !keep.has(l.canvas)) freeCanvas(l.canvas);
+    for (const st of candidateStates) for (const c of this._canvasesOf(st)) {
+      if (!keep.has(c) && c !== this.lastSelection?.canvas) freeCanvas(c);
     }
   }
   _freePatches(list) { for (const p of list) { freeCanvas(p.before); freeCanvas(p.after); } }
 
-  /** Calque actif + trait en cours, sur une toile de travail (seulement la zone qui a bougé). */
+  /** Calque (ou masque) actif + trait en cours, sur une toile de travail (seulement la zone qui a bougé). */
   _liveOverride() {
     const lv = this.live;
     const L = this.state.layers.find(l => l.id === lv.layerId);
     if (!L) return null;
-    if (lv.canvas) return new Map([[L.id, lv.canvas]]); // toile complète fournie (dégradé…)
-    const c = L.canvas;
+    const key = lv.target === 'mask' ? `mask:${L.id}` : L.id;
+    if (lv.canvas) return new Map([[key, lv.canvas]]); // toile complète fournie (dégradé, déplacement…)
+    const c = lv.target === 'mask' ? L.mask.canvas : L.canvas;
     let s = this._liveScratch;
     let r = lv.dirty;
     if (!s || s.width !== c.width || s.height !== c.height || this._liveFresh) {
@@ -187,14 +197,29 @@ export class Doc {
         ctx.save();
         ctx.clearRect(x, y, w, h);
         ctx.drawImage(c, x, y, w, h, x, y, w, h);
-        ctx.globalAlpha = lv.alpha;
-        ctx.globalCompositeOperation = lv.op;
-        ctx.drawImage(lv.buf, x, y, w, h, x, y, w, h);
+        const src = lv.sel ? this._maskedBuf(lv, x, y, w, h) : lv.buf;
+        const sx = lv.sel ? 0 : x, sy = lv.sel ? 0 : y;
+        applyBuf(ctx, src, sx, sy, x, y, w, h, lv);
         ctx.restore();
+        bump(s);
       }
       lv.dirty = null;
     }
-    return new Map([[L.id, s]]);
+    return new Map([[key, s]]);
+  }
+
+  /** Zone du tampon limitée à la sélection (dans une petite toile de travail). */
+  _maskedBuf(lv, x, y, w, h) {
+    let t = this._liveTmp;
+    if (!t || t.width < w || t.height < h) { freeCanvas(t); t = this._liveTmp = newCanvas(Math.max(w, t?.width || 0), Math.max(h, t?.height || 0)); }
+    const ctx = t.getContext('2d');
+    ctx.save();
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(lv.buf, x, y, w, h, 0, 0, w, h);
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(lv.sel.canvas, lv.sel.ox - x, lv.sel.oy - y);
+    ctx.restore();
+    return t;
   }
 
   /** Image composée du document, recalculée seulement si nécessaire. */
@@ -209,7 +234,7 @@ export class Doc {
     const ctx = this._comp.getContext('2d');
     if (this._compDirty) {
       ctx.clearRect(0, 0, st.width, st.height);
-      this._scratch = drawStack(this._comp, st.layers, 0, 0, this._scratch, override);
+      drawStack(this._comp, st.layers, 0, 0, { pool: this._pool, override });
     } else if (this._dirtyRect) {
       const r = this._dirtyRect;
       const x = Math.max(0, Math.floor(r.x)), y = Math.max(0, Math.floor(r.y));
@@ -218,13 +243,13 @@ export class Doc {
         ctx.save();
         ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
         ctx.clearRect(x, y, w, h);
-        this._scratch = drawStack(this._comp, st.layers, 0, 0, this._scratch, override);
+        drawStack(this._comp, st.layers, 0, 0, { pool: this._pool, override, clip: { x, y, w, h } });
         ctx.restore();
       }
     }
     this._compDirty = false;
     this._dirtyRect = null;
-    if (!this.live && this._liveScratch) { freeCanvas(this._liveScratch); this._liveScratch = null; }
+    if (!this.live && this._liveScratch) { freeCanvas(this._liveScratch); freeCanvas(this._liveTmp); this._liveScratch = this._liveTmp = null; }
     return this._comp;
   }
 
@@ -233,7 +258,24 @@ export class Doc {
     for (const e of this.entries) { this._canvasesOf(e.state, all); if (e.patches) this._freePatches(e.patches); }
     if (this.preview) this._canvasesOf(this.preview, all);
     for (const c of all) freeCanvas(c);
-    freeCanvas(this._comp); freeCanvas(this._scratch); freeCanvas(this._liveScratch);
-    this.entries = []; this._comp = null; this._scratch = null; this._liveScratch = null;
+    freeCanvas(this._comp); this._pool.dispose(); freeCanvas(this._liveScratch); freeCanvas(this._liveTmp);
+    this.entries = []; this._comp = null; this._liveScratch = null;
+  }
+}
+
+/** Applique le tampon d'un trait sur une toile (calque : peinture / gomme ; masque : niveau de gris). */
+export function applyBuf(ctx, src, sx, sy, x, y, w, h, o) {
+  ctx.globalAlpha = o.alpha;
+  if (o.lum != null) { // masque : on rapproche la valeur du masque de la luminosité choisie
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.drawImage(src, sx, sy, w, h, x, y, w, h);
+    if (o.lum > 0) {
+      ctx.globalAlpha = o.alpha * o.lum;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(src, sx, sy, w, h, x, y, w, h);
+    }
+  } else {
+    ctx.globalCompositeOperation = o.op;
+    ctx.drawImage(src, sx, sy, w, h, x, y, w, h);
   }
 }

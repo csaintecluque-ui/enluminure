@@ -2,6 +2,7 @@
 import { newCanvas, ctxOf, mkLayer, limitScale, isIOS, isTouch, baseName, canvasToBlob } from './util.js';
 import { Doc } from './document.js';
 import { flattenState } from './render.js';
+import { buildTree, normalize } from './tree.js';
 import { scaleCanvas } from './ops.js';
 
 let agPsdPromise = null;
@@ -79,27 +80,31 @@ export async function openFileAsDoc(file) {
 
 // ——— PSD ———
 
-/** Applique un masque de fusion PSD directement dans les pixels (les masques modifiables arrivent à l'étape 3). */
-function bakeMask(layer, canvas) {
-  const m = layer.mask;
-  if (!m || m.disabled || !m.canvas) return false;
-  const w = canvas.width, h = canvas.height;
-  const alpha = newCanvas(w, h);
-  const a = ctxOf(alpha);
-  const def = m.defaultColor ?? 0;
-  a.fillStyle = `rgb(${def},${def},${def})`;
-  a.fillRect(0, 0, w, h);
-  a.drawImage(m.canvas, (m.left ?? 0) - (layer.left ?? 0), (m.top ?? 0) - (layer.top ?? 0));
-  const img = a.getImageData(0, 0, w, h);
+/** Masque PSD (niveaux de gris) → masque Enluminure (canal alpha). */
+function maskFromPsd(m) {
+  if (!m || !m.canvas || !m.canvas.width) return null;
+  const c = newCanvas(m.canvas.width, m.canvas.height);
+  const ctx = ctxOf(c);
+  ctx.drawImage(m.canvas, 0, 0);
+  const img = ctx.getImageData(0, 0, c.width, c.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) { d[i + 3] = d[i]; d[i] = d[i + 1] = d[i + 2] = 0; }
-  a.putImageData(img, 0, 0);
-  const ctx = ctxOf(canvas);
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.drawImage(alpha, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
-  alpha.width = 0;
-  return true;
+  ctx.putImageData(img, 0, 0);
+  return { canvas: c, x: m.left ?? 0, y: m.top ?? 0, def: (m.defaultColor ?? 0) > 127 ? 255 : 0, disabled: !!m.disabled };
+}
+/** Masque Enluminure → masque PSD (niveaux de gris opaques). */
+function maskToPsd(m) {
+  if (!m?.canvas) return undefined;
+  const c = newCanvas(m.canvas.width, m.canvas.height);
+  const ctx = ctxOf(c);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, c.width, c.height);
+  const w = newCanvas(c.width, c.height);
+  const wctx = ctxOf(w);
+  wctx.drawImage(m.canvas, 0, 0);
+  wctx.globalCompositeOperation = 'source-in'; wctx.fillStyle = '#fff'; wctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(w, 0, 0);
+  w.width = 0;
+  return { canvas: c, left: m.x, top: m.y, right: m.x + c.width, bottom: m.y + c.height, defaultColor: m.def ? 255 : 0, disabled: !!m.disabled };
 }
 
 export async function openPsd(file) {
@@ -110,39 +115,39 @@ export async function openPsd(file) {
   const scale = limitScale(psd.width, psd.height);
   if (scale < 1) throw new Error(`Ce PSD fait ${psd.width}×${psd.height} px : trop grand pour ${isIOS ? 'Safari sur iPhone / iPad' : 'ce navigateur'}.`);
   const out = [];
-  let groups = 0, adjust = 0, masks = 0, texts = 0;
-  const walk = (children, parentHidden, parentOpacity, prefix) => {
+  let groups = 0, adjust = 0, texts = 0;
+  const walk = (children, parent) => {
     for (const ch of children || []) {
       if (ch.children) {
         groups++;
-        walk(ch.children, parentHidden || ch.hidden, parentOpacity * (ch.opacity ?? 1), `${prefix}${ch.name || 'Groupe'} › `);
+        const g = mkLayer({
+          kind: 'group', name: ch.name || 'Groupe', canvas: null, parent,
+          opacity: ch.opacity ?? 1, blend: ch.blendMode || 'pass through', visible: !ch.hidden,
+          clipping: !!ch.clipping, mask: maskFromPsd(ch.mask),
+        });
+        walk(ch.children, g.id);
+        out.push(g);
         continue;
       }
       if (ch.adjustment) { adjust++; continue; }
       if (ch.text) texts++;
       let canvas = ch.canvas;
       let x = ch.left ?? 0, y = ch.top ?? 0;
-      if (!canvas || !canvas.width || !canvas.height) {
-        canvas = newCanvas(psd.width, psd.height); x = 0; y = 0; // calque vide
-      } else if (bakeMask(ch, canvas)) masks++;
+      if (!canvas || !canvas.width || !canvas.height) { canvas = newCanvas(psd.width, psd.height); x = 0; y = 0; }
       out.push(mkLayer({
-        name: `${prefix}${ch.name || 'Calque'}`,
-        canvas, x, y,
-        opacity: (ch.opacity ?? 1) * parentOpacity,
-        blend: ch.blendMode || 'normal',
-        visible: !(ch.hidden || parentHidden),
-        clipping: !!ch.clipping,
+        name: ch.name || 'Calque', canvas, x, y, parent,
+        opacity: ch.opacity ?? 1, blend: ch.blendMode || 'normal', visible: !ch.hidden,
+        clipping: !!ch.clipping, mask: maskFromPsd(ch.mask),
       }));
     }
   };
-  walk(psd.children, false, 1, '');
+  walk(psd.children, null);
   if (!out.length && psd.canvas) out.push(mkLayer({ name: 'Arrière-plan', canvas: psd.canvas }));
-  if (!out.length) throw new Error('Ce PSD ne contient aucune image lisible.');
-  if (groups) notes.push(`${groups} groupe(s) de calques mis à plat dans la liste (les groupes arrivent dans une prochaine étape).`);
-  if (masks) notes.push(`${masks} masque(s) de fusion appliqué(s) directement aux pixels.`);
+  if (!out.some(l => l.kind !== 'group')) throw new Error('Ce PSD ne contient aucune image lisible.');
   if (adjust) notes.push(`${adjust} calque(s) de réglage ignoré(s) pour l'instant (étape 4).`);
   if (texts) notes.push(`${texts} calque(s) de texte ouverts comme images.`);
-  const doc = new Doc({ name: baseName(file.name), width: psd.width, height: psd.height, layers: out, label: 'Ouverture' });
+  void groups;
+  const doc = new Doc({ name: baseName(file.name), width: psd.width, height: psd.height, layers: normalize(out), label: 'Ouverture' });
   doc.fileName = file.name;
   doc.markSaved();
   return { doc, notes };
@@ -151,21 +156,14 @@ export async function openPsd(file) {
 export async function docToPsdBlob(doc) {
   const ag = await loadPsdLib();
   const st = doc.committed;
-  const psd = {
-    width: st.width,
-    height: st.height,
-    canvas: flattenState(st),
-    children: st.layers.map(l => ({
-      name: l.name,
-      canvas: l.canvas,
-      left: l.x,
-      top: l.y,
-      opacity: l.opacity,
-      blendMode: l.blend,
-      hidden: !l.visible,
-      clipping: l.clipping,
-    })),
-  };
+  const toPsd = (nodes) => nodes.map(({ layer: l, children }) => (children ? {
+    name: l.name, opacity: l.opacity, blendMode: l.blend, hidden: !l.visible, clipping: l.clipping, opened: true,
+    mask: maskToPsd(l.mask), children: toPsd(children),
+  } : {
+    name: l.name, canvas: l.canvas, left: l.x, top: l.y, opacity: l.opacity, blendMode: l.blend,
+    hidden: !l.visible, clipping: l.clipping, mask: maskToPsd(l.mask),
+  }));
+  const psd = { width: st.width, height: st.height, canvas: flattenState(st), children: toPsd(buildTree(st.layers)) };
   const data = ag.writePsd(psd, { generateThumbnail: true, trimImageData: true, noBackground: true });
   psd.canvas.width = 0;
   return new Blob([data], { type: 'image/vnd.adobe.photoshop' });

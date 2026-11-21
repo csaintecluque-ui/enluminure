@@ -13,9 +13,9 @@ Tout se passe sur l'appareil : aucune image n'est envoyée sur internet.
 - Enregistrement en .psd avec les calques, export JPG / PNG / WebP (qualité, taille)
 - Raccourcis clavier de Photoshop
 
-Limites connues de l'étape 1 : les groupes de calques d'un PSD sont mis à plat dans la liste, les masques de fusion sont appliqués aux pixels, les calques de réglage sont ignorés.
+Limite connue : les calques de réglage d'un PSD sont ignorés (étape 4).
 
-## Étape 2 — les outils de base (v0.2.0)
+## Étape 2 — les outils de base
 
 - Pinceau et gomme : taille, dureté, opacité, flux, pression du stylet (taille et / ou opacité), trait droit avec Maj, `[` `]` pour la taille, chiffres pour l'opacité
 - Couleurs de premier plan et d'arrière-plan (X : inverser, D : noir et blanc), pipette (Alt : arrière-plan ; Alt+clic au pinceau)
@@ -27,11 +27,23 @@ Limites connues de l'étape 1 : les groupes de calques d'un PSD sont mis à plat
 - Édition : remplir avec le premier plan / l'arrière-plan, effacer le calque
 - Historique de la peinture par zones modifiées : l'annulation reste illimitée sans saturer la mémoire
 
+## Étape 3 — sélections, masques, transformation, groupes (v0.3.0)
+
+- Sélections : rectangle, ellipse, lasso, lasso polygonal, baguette magique (tolérance, contigu, tous les calques)
+- Modes nouvelle / ajouter (Maj) / soustraire (Alt) / intersection (Maj+Alt), contour progressif, pointillés animés
+- Menu Sélection : tout sélectionner, désélectionner, resélectionner, intervertir, contour progressif, dilater, contracter, pixels du calque, depuis le masque
+- Les outils de peinture, le pot, le dégradé, remplir et effacer restent dans la sélection ; couper / copier la sélection, calque par copie / par coupe, recadrer sur la sélection
+- L'outil Déplacer déplace les pixels sélectionnés ; glisser dans une sélection avec un outil de sélection déplace son contour
+- Masques de fusion sur les calques et les groupes : tout faire apparaître / tout masquer / depuis la sélection, peinture en niveaux de gris (pinceau, gomme, dégradé, pot), désactiver, appliquer, supprimer
+- Transformation manuelle (Ctrl+T) : déplacer, mettre à l'échelle (proportions), rotation (Maj : 15°), symétries, valeurs numériques, sur le calque ou sur la sélection
+- Groupes de calques : créer, grouper / dissocier, replier, glisser des calques dedans, opacité / mode / masque du groupe, fusionner un groupe, sélection multiple de calques
+- PSD : les groupes et les masques sont lus et enregistrés
+
 ## Feuille de route
 
 1. Le socle ✔
 2. Outils de base : pinceau (pression du stylet), gomme, pot de peinture, dégradé, texte, formes, pipette, recadrage ✔
-3. Sélections et masques : rectangle, lasso, baguette magique, masques de calque, transformation libre, groupes
+3. Sélections et masques : rectangle, lasso, baguette magique, masques de calque, transformation libre, groupes ✔
 4. Réglages et filtres : niveaux, courbes, teinte / saturation, calques de réglage, flou, netteté
 5. Outils « pro » : tampon, correcteur, fluidité, styles de calque, objets dynamiques
 6. IA locale : détourage, sélection d'objet, gomme magique, agrandissement, remplissage intelligent
@@ -56,6 +68,8 @@ Aucune compilation : ce sont des fichiers HTML, CSS et JavaScript prêts à l'em
 | `js/view.js` | Zone de travail : affichage, zoom, souris, doigts |
 | `js/tools.js` | Outils : pinceau, gomme, pipette, pot, dégradé, formes, texte, recadrage |
 | `js/paint.js` | Moteur de peinture, remplissage, dégradés, rendu du texte et des formes |
+| `js/selection.js` | Sélections : création, combinaisons, contour progressif, pointillés |
+| `js/tree.js` | Groupes de calques : arborescence et réorganisation |
 | `js/panels.js` | Panneaux Calques, Historique, outils, onglets |
 | `js/io.js` | Ouverture et enregistrement des fichiers |
 | `vendor/ag-psd.min.js` | Lecture / écriture des PSD (bibliothèque ag-psd, licence MIT) |
