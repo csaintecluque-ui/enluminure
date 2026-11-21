@@ -19,10 +19,10 @@ export const modalOpen = () => !!document.querySelector('.modal-overlay');
  * Fenêtre modale. `onSubmit` peut renvoyer false pour garder la fenêtre ouverte.
  * Résout avec la valeur du bouton choisi (null si annulé).
  */
-export function openDialog({ title, body, buttons, onSubmit, wide = false, className = '' }) {
+export function openDialog({ title, body, buttons, onSubmit, wide = false, className = '', floating = false }) {
   buttons = buttons || [{ label: 'Annuler', value: null }, { label: 'OK', primary: true }];
   return new Promise(resolve => {
-    const overlay = el('div', { class: 'modal-overlay' });
+    const overlay = el('div', { class: `modal-overlay ${floating ? 'floating' : ''}` });
     const form = el('form', { class: `modal ${wide ? 'wide' : ''} ${className}`, novalidate: true });
     let done = false;
     const close = (v) => {
@@ -50,12 +50,12 @@ export function openDialog({ title, body, buttons, onSubmit, wide = false, class
         close(r === undefined ? (primary?.value ?? true) : r);
       } else close(primary?.value ?? true);
     });
-    overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) close(null); });
+    overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay && !floating) close(null); });
     overlay.append(form);
     $('#modal-root').append(overlay);
     document.addEventListener('keydown', onKey, true);
     requestAnimationFrame(() => {
-      const f = form.querySelector('input:not([type=hidden]):not([disabled]), select');
+      const f = form.querySelector('textarea, input:not([type=hidden]):not([disabled]), select');
       if (f && !matchMedia('(pointer: coarse)').matches) { f.focus(); f.select?.(); }
       else form.querySelector('button.primary')?.focus();
     });
@@ -89,7 +89,7 @@ export class MenuBar {
       container.append(b);
     });
     document.addEventListener('pointerdown', (e) => {
-      if (this.drop && !this.drop.contains(e.target) && !container.contains(e.target)) this.close();
+      if (this.drop && !this.drop.contains(e.target) && !container.contains(e.target) && e.target !== this.allBtn) this.close();
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.drop) this.close(); });
     window.addEventListener('resize', () => this.close());
@@ -120,6 +120,34 @@ export class MenuBar {
     drop.style.top = `${r.bottom + 2}px`;
     drop.style.maxHeight = `${innerHeight - r.bottom - 12}px`;
     this.drop = drop;
+  }
+
+  /** Téléphone : tous les menus dans une seule liste, sous un bouton. */
+  openAll(btn) {
+    if (this.drop) { this.close(); return; }
+    this.openIndex = -1;
+    const drop = el('div', { class: 'menu-drop menu-all', role: 'menu' });
+    for (const m of this.menus) {
+      drop.append(el('div', { class: 'menu-group' }, m.label));
+      for (const it of m.items) {
+        if (it === '-') continue;
+        if (it.heading) { drop.append(el('div', { class: 'menu-heading' }, it.heading)); continue; }
+        const act = this.app.actions[it.action];
+        const enabled = act && (!act.enabled || act.enabled());
+        const checked = act?.checked?.();
+        const row = el('button', { type: 'button', class: `menu-item ${checked ? 'checked' : ''}`, disabled: !enabled, role: 'menuitem' },
+          el('span', { class: 'mi-check' }, checked ? '✓' : ''), el('span', { class: 'mi-label' }, it.label), el('span', { class: 'mi-key' }, ''));
+        row.addEventListener('click', () => { this.close(); this.app.run(it.action); });
+        drop.append(row);
+      }
+    }
+    document.body.append(drop);
+    const r = btn.getBoundingClientRect();
+    drop.style.left = '4px';
+    drop.style.top = `${r.bottom + 4}px`;
+    drop.style.maxHeight = `${innerHeight - r.bottom - 12}px`;
+    this.drop = drop;
+    this.allBtn = btn;
   }
 
   close() {

@@ -8,6 +8,8 @@ import { $, toast, openDialog, confirmDialog, field, MenuBar, modalOpen } from '
 import { initLayersPanel, renderLayers, renderHistory, renderTabs, initToolbar, renderToolbar, renderOptions, renderStatus, startRename, TOOLS } from './panels.js';
 import { openFileAsDoc, fileToCanvas, isPsd, docToPsdBlob, exportBlob, saveBlob } from './io.js';
 import { icon, LOGO_SMALL } from './icons.js';
+import { createTools, DEFAULT_SETTINGS } from './tools.js';
+import { commitPixels } from './paint.js';
 
 const MOD = isMac || isIOS ? '⌘' : 'Ctrl';
 const K = (s) => s.replace(/Ctrl/g, MOD);
@@ -21,6 +23,14 @@ class App {
     this.opts = { autoSelect: false, showBounds: true, zoomOut: false };
     try { Object.assign(this.opts, JSON.parse(localStorage.getItem('enluminure.opts') || '{}')); } catch {}
     this.opts.zoomOut = false;
+    this.settings = structuredClone(DEFAULT_SETTINGS);
+    try {
+      const saved = JSON.parse(localStorage.getItem('enluminure.settings') || '{}');
+      for (const k of Object.keys(this.settings)) Object.assign(this.settings[k], saved[k] || {});
+    } catch {}
+    this.colors = { fg: '#000000', bg: '#ffffff' };
+    try { Object.assign(this.colors, JSON.parse(localStorage.getItem('enluminure.colors') || '{}')); } catch {}
+    this.tools = createTools(this);
     this.actions = this.buildActions();
     this.view = new Viewport(this, $('#view'));
     this.menubar = new MenuBar($('#menubar'), this.buildMenus(), this);
@@ -33,7 +43,26 @@ class App {
     this.refresh();
   }
 
-  saveOpts() { try { localStorage.setItem('enluminure.opts', JSON.stringify(this.opts)); } catch {} }
+  saveOpts() {
+    try {
+      localStorage.setItem('enluminure.opts', JSON.stringify(this.opts));
+      localStorage.setItem('enluminure.settings', JSON.stringify(this.settings));
+      localStorage.setItem('enluminure.colors', JSON.stringify(this.colors));
+    } catch {}
+  }
+  refreshOptions() { renderOptions(this); }
+
+  // ——— Couleurs ———
+  setColor(which, hex) { this.colors[which] = hex; this.saveOpts(); renderToolbar(this); this.view.requestRender(); }
+  swapColors() { const { fg, bg } = this.colors; this.colors = { fg: bg, bg: fg }; this.saveOpts(); renderToolbar(this); }
+  resetColors() { this.colors = { fg: '#000000', bg: '#ffffff' }; this.saveOpts(); renderToolbar(this); }
+  pickColor(which) {
+    const i = $('#color-input');
+    i.value = this.colors[which];
+    i.oninput = () => this.setColor(which, i.value);
+    i.onchange = () => this.setColor(which, i.value);
+    i.click();
+  }
   toast(m, ms) { toast(m, ms); }
 
   // ——— Documents ———
@@ -87,7 +116,12 @@ class App {
     const t = TOOLS.find(x => x.id === id);
     if (!t) return;
     if (t.step) { toast(`L'outil ${t.label} arrive à l'étape ${t.step}.`); return; }
-    this.tool = id;
+    if (this.tool !== id) {
+      this.view._cancelAction?.();
+      this.tools[this.tool]?.deactivate?.();
+      this.tool = id;
+      this.tools[id]?.activate?.();
+    }
     renderOptions(this);
     renderToolbar(this);
     this.view.updateCursor();
@@ -156,6 +190,11 @@ class App {
         return ops.updateLayer(st, id, { x: Math.round((st.width - l.canvas.width) / 2), y: Math.round((st.height - l.canvas.height) / 2) });
       }),
 
+      fillFg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.fg, 'Remplir (premier plan)') },
+      fillBg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.bg, 'Remplir (arrière-plan)') },
+      clearLayer: { enabled: hasLayer, run: () => this.fillLayer(null, 'Effacer le calque') },
+      editText: { enabled: () => !!D()?.active?.text, run: () => this.tools.text.edit(D().active) },
+      cropTool: { enabled: hasDoc, run: () => this.setTool('crop') },
       imageSize: { enabled: hasDoc, run: () => this.dialogImageSize() },
       canvasSize: { enabled: hasDoc, run: () => this.dialogCanvasSize() },
       rotCW: imgOp("Rotation de l'image 90° horaire", 'cw'),
@@ -230,6 +269,10 @@ class App {
         { label: 'Copier avec fusion', action: 'copyMerged', key: K('Ctrl+Maj+C') },
         { label: 'Coller', action: 'paste', key: K('Ctrl+V') },
         '-',
+        { label: 'Remplir avec le premier plan', action: 'fillFg', key: 'Alt+Retour' },
+        { label: "Remplir avec l'arrière-plan", action: 'fillBg', key: K('Ctrl+Retour') },
+        { label: 'Effacer le contenu du calque', action: 'clearLayer' },
+        '-',
         { heading: 'Transformation du calque' },
         { label: 'Rotation 90° horaire', action: 'layerCW' },
         { label: 'Rotation 90° antihoraire', action: 'layerCCW' },
@@ -239,6 +282,7 @@ class App {
         { label: 'Centrer dans l\'image', action: 'centerLayer' },
       ] },
       { label: 'Image', items: [
+        { label: 'Recadrer…', action: 'cropTool', key: 'C' },
         { label: "Taille de l'image…", action: 'imageSize', key: K('Ctrl+Alt+I') },
         { label: 'Taille de la zone de travail…', action: 'canvasSize', key: K('Ctrl+Alt+C') },
         '-',
@@ -256,6 +300,7 @@ class App {
         { label: 'Dupliquer le calque', action: 'duplicateLayer', key: K('Ctrl+J') },
         { label: 'Supprimer le calque', action: 'deleteLayer', key: 'Suppr' },
         { label: 'Renommer le calque…', action: 'renameLayer' },
+        { label: 'Modifier le texte…', action: 'editText' },
         { label: 'Afficher / masquer', action: 'toggleVisible', key: K('Ctrl+,') },
         '-',
         { label: "Masque d'écrêtage", action: 'clipLayer', key: K('Ctrl+Alt+G') },
@@ -291,6 +336,7 @@ class App {
     $('#brand-logo').innerHTML = LOGO_SMALL;
     $('#btn-undo').innerHTML = icon('undo');
     $('#btn-redo').innerHTML = icon('redo');
+    $('#btn-menu').addEventListener('click', (e) => { e.stopPropagation(); this.menubar.openAll($('#btn-menu')); });
     $('#btn-undo').addEventListener('click', () => this.run('undo'));
     $('#btn-redo').addEventListener('click', () => this.run('redo'));
     $('#w-new').addEventListener('click', () => this.run('new'));
@@ -328,6 +374,7 @@ class App {
       'ctrl+]': 'layerUp', 'ctrl+[': 'layerDown', 'ctrl+shift+]': 'layerTop', 'ctrl+shift+[': 'layerBottom',
       'ctrl+0': 'fit', 'ctrl+1': 'zoom100', 'ctrl++': 'zoomIn', 'ctrl+-': 'zoomOut',
       'delete': 'deleteLayer', 'backspace': 'deleteLayer', 'f11': 'fullscreen',
+      'alt+backspace': 'fillFg', 'alt+delete': 'fillFg', 'ctrl+backspace': 'fillBg', 'ctrl+delete': 'fillBg',
     };
     const typing = (t) => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
     document.addEventListener('keydown', (e) => {
@@ -353,10 +400,16 @@ class App {
         this.run(map[combo]);
         return;
       }
+      // L'outil en cours d'abord (taille du pinceau, Entrée / Échap du recadrage…)
+      const impl = this.tools[this.tool];
+      if (impl?.key && !ctrl && impl.key(e, k)) { e.preventDefault(); return; }
       if (ctrl || e.altKey) return;
       // Outils
-      const tool = { v: 'move', h: 'hand', z: 'zoom' }[k];
-      if (tool) { this.setTool(tool); return; }
+      if (k === 'g' && e.shiftKey) { this.setTool(this.tool === 'bucket' ? 'gradient' : 'bucket'); return; }
+      const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop' }[k];
+      if (tool && !e.shiftKey) { this.setTool(tool); return; }
+      if (k === 'x') { this.swapColors(); return; }
+      if (k === 'd') { this.resetColors(); return; }
       // Décalage au clavier
       const arrows = { arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1] };
       if (arrows[k] && this.tool === 'move' && this.doc?.active) {
@@ -490,6 +543,15 @@ class App {
     } catch {
       toast('Copie refusée par le navigateur.');
     }
+  }
+
+  fillLayer(color, label) {
+    const d = this.doc, L = d.active;
+    if (!L.visible) { toast('Ce calque est masqué.'); return; }
+    commitPixels(this, label, L.id, { x: 0, y: 0, w: d.width, h: d.height }, (ctx, layer) => {
+      if (color) { ctx.fillStyle = color; ctx.fillRect(-layer.x, -layer.y, d.width, d.height); }
+      else ctx.clearRect(-layer.x, -layer.y, d.width, d.height);
+    });
   }
 
   async savePsd() {
@@ -676,6 +738,14 @@ class App {
       ["Taille de l'écran / 100 %", K('Ctrl+0 · Ctrl+1')],
       ['Zoom avant / arrière', K('Ctrl++ · Ctrl+- · molette')],
       ['Déplacer / Main / Zoom', 'V · H · Z'],
+      ['Pinceau / Gomme / Pipette', 'B · E · I'],
+      ['Dégradé / Pot de peinture', 'G · Maj+G'],
+      ['Texte / Formes / Recadrage', 'T · U · C'],
+      ['Taille du pinceau / dureté', '[ ] · Maj+[ ]'],
+      ['Opacité du pinceau', '1 … 9, 0 = 100 %'],
+      ['Trait droit', 'Maj+clic'],
+      ['Inverser les couleurs / noir et blanc', 'X · D'],
+      ['Remplir premier plan / arrière-plan', K('Alt+Retour arrière · Ctrl+Retour arrière')],
       ['Main temporaire', 'Espace (maintenu) ou clic molette'],
       ['Choisir le calque sous la souris', `${MOD}+clic avec Déplacer`],
       ['Décaler le calque', 'Flèches (Maj : 10 px)'],
@@ -691,7 +761,7 @@ class App {
       el('img', { src: 'icons/sceau-enluminure.svg', alt: '', width: 120, height: 120 }),
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
-      el('p', { class: 'muted' }, 'Étape 1 — le socle : calques, modes de fusion, historique, PSD.'),
+      el('p', { class: 'muted' }, 'Étape 2 — outils de base : pinceau, gomme, pipette, pot de peinture, dégradé, formes, texte, recadrage.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }

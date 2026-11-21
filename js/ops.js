@@ -57,7 +57,7 @@ export function mergeDown(st, id) {
   const lowFlat = { ...low, opacity: 1, blend: 'normal', clipping: false, visible: true };
   const upFix = { ...up, clipping: up.clipping, visible: true };
   drawStack(c, [lowFlat, upFix], r.x, r.y);
-  const merged = { ...low, canvas: c, x: r.x, y: r.y };
+  const merged = { ...low, canvas: c, x: r.x, y: r.y, text: null };
   const layers = [...st.layers];
   layers.splice(i - 1, 2, merged);
   return { state: withLayers(st, layers), activeId: merged.id };
@@ -114,7 +114,7 @@ export function transformImage(st, kind) {
     else if (kind === '180') { nx = W - (x + w); ny = H - (y + h); }
     else if (kind === 'fh') { nx = W - (x + w); }
     else if (kind === 'fv') { ny = H - (y + h); }
-    return { ...l, canvas: transformCanvas(l.canvas, kind), x: nx, y: ny };
+    return { ...l, canvas: transformCanvas(l.canvas, kind), x: nx, y: ny, text: null };
   });
   return { ...st, width: swap ? H : W, height: swap ? W : H, layers };
 }
@@ -128,6 +128,7 @@ export function transformLayer(st, id, kind) {
   const cx = x + w / 2, cy = y + h / 2;
   return updateLayer(st, id, {
     canvas,
+    text: null,
     x: Math.round(cx - canvas.width / 2),
     y: Math.round(cy - canvas.height / 2),
   });
@@ -173,7 +174,7 @@ export function resizeImage(st, nw, nh, method) {
     if (!l.canvas) return l;
     const x0 = Math.round(l.x * sx), y0 = Math.round(l.y * sy);
     const x1 = Math.round((l.x + l.canvas.width) * sx), y1 = Math.round((l.y + l.canvas.height) * sy);
-    return { ...l, canvas: scaleCanvas(l.canvas, Math.max(1, x1 - x0), Math.max(1, y1 - y0), method), x: x0, y: y0 };
+    return { ...l, canvas: scaleCanvas(l.canvas, Math.max(1, x1 - x0), Math.max(1, y1 - y0), method), x: x0, y: y0, text: null };
   });
   return { ...st, width: nw, height: nh, layers };
 }
@@ -190,7 +191,7 @@ export function resizeCanvasArea(st, nw, nh, anchor, fill) {
     const ctx = ctxOf(c);
     ctx.fillStyle = fill; ctx.fillRect(0, 0, nw, nh);
     if (bottom.canvas) ctx.drawImage(bottom.canvas, bottom.x, bottom.y);
-    layers = [{ ...bottom, canvas: c, x: 0, y: 0 }, ...layers.slice(1)];
+    layers = [{ ...bottom, canvas: c, x: 0, y: 0, text: null }, ...layers.slice(1)];
   }
   return { ...st, width: nw, height: nh, layers };
 }
@@ -208,4 +209,22 @@ export function pickLayerAt(st, px, py) {
     } catch { return l.id; }
   }
   return null;
+}
+
+/** Recadrage : le document devient le rectangle r (coordonnées du document). */
+export function cropState(st, r, deletePixels) {
+  const W = Math.max(1, Math.round(r.w)), H = Math.max(1, Math.round(r.h));
+  const rx = Math.round(r.x), ry = Math.round(r.y);
+  const layers = st.layers.map(l => {
+    const x = l.x - rx, y = l.y - ry;
+    if (!deletePixels || !l.canvas) return { ...l, x, y };
+    const cw = l.canvas.width, ch = l.canvas.height;
+    const ix = Math.max(0, x), iy = Math.max(0, y), ix2 = Math.min(W, x + cw), iy2 = Math.min(H, y + ch);
+    if (ix === x && iy === y && ix2 === x + cw && iy2 === y + ch) return { ...l, x, y }; // déjà dedans
+    if (ix2 <= ix || iy2 <= iy) return { ...l, canvas: newCanvas(1, 1), x: 0, y: 0, text: null };
+    const c = newCanvas(ix2 - ix, iy2 - iy);
+    ctxOf(c).drawImage(l.canvas, x - ix, y - iy);
+    return { ...l, canvas: c, x: ix, y: iy, text: null };
+  });
+  return { ...st, width: W, height: H, layers };
 }

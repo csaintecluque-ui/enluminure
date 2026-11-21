@@ -1,5 +1,5 @@
 // Enluminure — document, historique (annuler / rétablir) et gestion mémoire
-import { uid, freeCanvas, LIMITS, newCanvas } from './util.js';
+import { uid, freeCanvas, LIMITS, newCanvas, bump } from './util.js';
 import { drawStack } from './render.js';
 
 /**
@@ -7,21 +7,28 @@ import { drawStack } from './render.js';
  * Les états ne sont jamais modifiés : chaque action crée un nouvel état.
  * Les toiles inchangées sont partagées entre états, donc garder 500 étapes
  * ne coûte presque rien tant qu'on ne touche pas aux pixels.
+ *
+ * Pour la peinture (pinceau, gomme, pot de peinture…), on ne recopie pas
+ * toute la toile : l'étape garde seulement la zone modifiée, « avant » et
+ * « après » (une rustine). Annuler recolle l'« avant », rétablir l'« après ».
  */
 export class Doc {
   constructor({ name, width, height, layers, label = 'Ouverture', activeId }) {
     this.id = uid();
     this.name = name || 'Sans titre';
     const state = { width, height, layers };
-    this.entries = [{ id: uid(), label, state, time: Date.now(), activeId: activeId || layers.at(-1)?.id }];
+    this.entries = [{ id: uid(), label, state, time: Date.now(), activeId: activeId || layers.at(-1)?.id, patches: null }];
     this.index = 0;
     this.activeId = this.entries[0].activeId;
     this.preview = null;
+    this.live = null;    // trait de pinceau en cours
     this.savedId = null; // pas encore enregistré
     this.trimmed = 0;    // étapes oubliées faute de mémoire
     this._comp = null;
     this._compDirty = true;
+    this._dirtyRect = null;
     this._scratch = null;
+    this._liveScratch = null;
     this.view = { zoom: 1, panX: 0, panY: 0, ready: false };
   }
 
@@ -37,34 +44,50 @@ export class Doc {
   get canRedo() { return this.index < this.entries.length - 1; }
 
   markSaved() { this.savedId = this.entries[this.index].id; }
-  markClean() { this.markSaved(); }
 
   invalidate() { this._compDirty = true; }
+  /** Seule une zone (coordonnées du document) a changé : recomposition partielle. */
+  invalidateRect(r) {
+    if (!r || r.w <= 0 || r.h <= 0) return;
+    if (!this._dirtyRect) { this._dirtyRect = { ...r }; return; }
+    const d = this._dirtyRect;
+    const x = Math.min(d.x, r.x), y = Math.min(d.y, r.y);
+    this._dirtyRect = { x, y, w: Math.max(d.x + d.w, r.x + r.w) - x, h: Math.max(d.y + d.h, r.y + r.h) - y };
+  }
 
   setPreview(state) { this.preview = state; this._compDirty = true; }
-  cancelPreview() { if (this.preview) { this.preview = null; this._compDirty = true; } }
+  cancelPreview() {
+    if (this.preview || this.live) { this.preview = null; this.live = null; this._compDirty = true; }
+  }
+  setLive(live) { this.live = live; this._liveFresh = true; this._compDirty = true; }
 
   setActive(id) { if (this.state.layers.some(l => l.id === id)) this.activeId = id; }
 
   /** Enregistre une nouvelle étape dans l'historique. */
-  commit(label, state, { activeId, mergeKey } = {}) {
+  commit(label, state, { activeId, mergeKey, patches } = {}) {
     this.preview = null;
+    this.live = null;
     const now = Date.now();
     const candidates = [];
+    const deadPatches = [];
     // On oublie les étapes « rétablir » qui ne servent plus
-    for (const e of this.entries.splice(this.index + 1)) candidates.push(e.state);
+    for (const e of this.entries.splice(this.index + 1)) {
+      candidates.push(e.state);
+      if (e.patches) deadPatches.push(...e.patches);
+    }
     const cur = this.entries[this.index];
     if (activeId) this.activeId = activeId;
-    if (mergeKey && cur.mergeKey === mergeKey && this.index > 0 && now - cur.time < 1500 && cur.id !== this.savedId) {
+    if (mergeKey && !patches && !cur.patches && cur.mergeKey === mergeKey && this.index > 0 && now - cur.time < 1500 && cur.id !== this.savedId) {
       candidates.push(cur.state);
       cur.state = state; cur.time = now; cur.activeId = this.activeId;
     } else {
-      this.entries.push({ id: uid(), label, state, time: now, mergeKey, activeId: this.activeId });
+      this.entries.push({ id: uid(), label, state, time: now, mergeKey, activeId: this.activeId, patches: patches || null });
       this.index++;
     }
     this._fixActive();
-    this._enforceBudget(candidates);
+    this._enforceBudget(candidates, deadPatches);
     this._gc(candidates);
+    this._freePatches(deadPatches);
     this._compDirty = true;
   }
 
@@ -73,12 +96,26 @@ export class Doc {
   goTo(i) {
     if (i < 0 || i >= this.entries.length || i === this.index) return false;
     this.preview = null;
-    this.index = i;
+    this.live = null;
+    while (this.index > i) { this._applyPatches(this.entries[this.index].patches, 'before'); this.index--; }
+    while (this.index < i) { this.index++; this._applyPatches(this.entries[this.index].patches, 'after'); }
     const want = this.entries[i].activeId;
     if (want && this.state.layers.some(l => l.id === want)) this.activeId = want;
     this._fixActive();
     this._compDirty = true;
     return true;
+  }
+
+  _applyPatches(patches, which) {
+    if (!patches) return;
+    const list = which === 'before' ? [...patches].reverse() : patches;
+    for (const p of list) {
+      const src = p[which];
+      const ctx = p.canvas.getContext('2d');
+      ctx.clearRect(p.x, p.y, src.width, src.height);
+      ctx.drawImage(src, p.x, p.y);
+      bump(p.canvas);
+    }
   }
 
   _fixActive() {
@@ -91,22 +128,29 @@ export class Doc {
     return set;
   }
 
-  /** Mémoire occupée par l'historique (pixels uniques). */
+  /** Mémoire occupée par l'historique (pixels uniques + rustines). */
   memoryBytes() {
     const all = new Set();
-    for (const e of this.entries) this._canvasesOf(e.state, all);
     let n = 0;
+    for (const e of this.entries) {
+      this._canvasesOf(e.state, all);
+      if (e.patches) for (const p of e.patches) n += (p.before.width * p.before.height + p.after.width * p.after.height) * 4;
+    }
     for (const c of all) n += c.width * c.height * 4;
     return n;
   }
 
   /** Si l'historique devient trop gourmand, on oublie les plus anciennes étapes. */
-  _enforceBudget(candidates) {
+  _enforceBudget(candidates, deadPatches) {
     while (this.index > 1 && this.memoryBytes() > LIMITS.historyBytes) {
       const e = this.entries.shift();
       this.index--;
       this.trimmed++;
       candidates.push(e.state);
+      if (e.patches) deadPatches.push(...e.patches);
+      // la nouvelle première étape n'a plus besoin de sa rustine (on ne peut plus revenir avant)
+      const first = this.entries[0];
+      if (first.patches) { deadPatches.push(...first.patches); first.patches = null; }
     }
   }
 
@@ -119,6 +163,39 @@ export class Doc {
       if (l.canvas && !keep.has(l.canvas)) freeCanvas(l.canvas);
     }
   }
+  _freePatches(list) { for (const p of list) { freeCanvas(p.before); freeCanvas(p.after); } }
+
+  /** Calque actif + trait en cours, sur une toile de travail (seulement la zone qui a bougé). */
+  _liveOverride() {
+    const lv = this.live;
+    const L = this.state.layers.find(l => l.id === lv.layerId);
+    if (!L) return null;
+    if (lv.canvas) return new Map([[L.id, lv.canvas]]); // toile complète fournie (dégradé…)
+    const c = L.canvas;
+    let s = this._liveScratch;
+    let r = lv.dirty;
+    if (!s || s.width !== c.width || s.height !== c.height || this._liveFresh) {
+      if (!s || s.width !== c.width || s.height !== c.height) { freeCanvas(s); s = this._liveScratch = newCanvas(c.width, c.height); }
+      r = { x: 0, y: 0, w: c.width, h: c.height };
+      this._liveFresh = false;
+    }
+    if (r) {
+      const x = Math.max(0, Math.floor(r.x)), y = Math.max(0, Math.floor(r.y));
+      const w = Math.min(c.width, Math.ceil(r.x + r.w)) - x, h = Math.min(c.height, Math.ceil(r.y + r.h)) - y;
+      if (w > 0 && h > 0) {
+        const ctx = s.getContext('2d');
+        ctx.save();
+        ctx.clearRect(x, y, w, h);
+        ctx.drawImage(c, x, y, w, h, x, y, w, h);
+        ctx.globalAlpha = lv.alpha;
+        ctx.globalCompositeOperation = lv.op;
+        ctx.drawImage(lv.buf, x, y, w, h, x, y, w, h);
+        ctx.restore();
+      }
+      lv.dirty = null;
+    }
+    return new Map([[L.id, s]]);
+  }
 
   /** Image composée du document, recalculée seulement si nécessaire. */
   composite() {
@@ -128,21 +205,35 @@ export class Doc {
       this._comp = newCanvas(st.width, st.height);
       this._compDirty = true;
     }
+    const override = this.live ? this._liveOverride() : null;
+    const ctx = this._comp.getContext('2d');
     if (this._compDirty) {
-      const ctx = this._comp.getContext('2d');
       ctx.clearRect(0, 0, st.width, st.height);
-      this._scratch = drawStack(this._comp, st.layers, 0, 0, this._scratch);
-      this._compDirty = false;
+      this._scratch = drawStack(this._comp, st.layers, 0, 0, this._scratch, override);
+    } else if (this._dirtyRect) {
+      const r = this._dirtyRect;
+      const x = Math.max(0, Math.floor(r.x)), y = Math.max(0, Math.floor(r.y));
+      const w = Math.min(st.width, Math.ceil(r.x + r.w)) - x, h = Math.min(st.height, Math.ceil(r.y + r.h)) - y;
+      if (w > 0 && h > 0) {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+        ctx.clearRect(x, y, w, h);
+        this._scratch = drawStack(this._comp, st.layers, 0, 0, this._scratch, override);
+        ctx.restore();
+      }
     }
+    this._compDirty = false;
+    this._dirtyRect = null;
+    if (!this.live && this._liveScratch) { freeCanvas(this._liveScratch); this._liveScratch = null; }
     return this._comp;
   }
 
   dispose() {
     const all = new Set();
-    for (const e of this.entries) this._canvasesOf(e.state, all);
+    for (const e of this.entries) { this._canvasesOf(e.state, all); if (e.patches) this._freePatches(e.patches); }
     if (this.preview) this._canvasesOf(this.preview, all);
     for (const c of all) freeCanvas(c);
-    freeCanvas(this._comp); freeCanvas(this._scratch);
-    this.entries = []; this._comp = null; this._scratch = null;
+    freeCanvas(this._comp); freeCanvas(this._scratch); freeCanvas(this._liveScratch);
+    this.entries = []; this._comp = null; this._scratch = null; this._liveScratch = null;
   }
 }

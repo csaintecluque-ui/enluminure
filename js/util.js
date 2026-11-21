@@ -1,6 +1,6 @@
 // Enluminure — outils communs (toiles, limites, modes de fusion)
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -30,6 +30,9 @@ export function cloneCanvas(src) {
   ctxOf(c).drawImage(src, 0, 0);
   return c;
 }
+
+/** Signale qu'une toile a changé de pixels (vignettes, caches). */
+export function bump(c) { if (c) c._v = (c._v || 0) + 1; }
 
 /** Libère tout de suite la mémoire d'une toile qui n'est plus utilisée (important sur iPhone). */
 export function freeCanvas(c) {
@@ -100,6 +103,7 @@ export function mkLayer(p) {
     blend: 'normal',
     visible: true,
     clipping: false,
+    text: null,   // calque de texte : réglages pour pouvoir le modifier
     ...p,
   };
 }

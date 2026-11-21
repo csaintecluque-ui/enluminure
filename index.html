@@ -19,10 +19,13 @@
 <div id="app">
   <header id="topbar">
     <div class="brand" title="Enluminure"><span id="brand-logo" class="brand-logo"></span><span class="brand-name">Enluminure</span></div>
+    <button id="btn-menu" class="btn small mobile-only" type="button" aria-label="Menus">Menus ▾</button>
     <nav id="menubar" aria-label="Menus"></nav>
     <div class="top-actions">
       <button id="btn-undo" class="icon-btn" type="button" title="Annuler (Ctrl+Z)" aria-label="Annuler"></button>
       <button id="btn-redo" class="icon-btn" type="button" title="Rétablir (Ctrl+Maj+Z)" aria-label="Rétablir"></button>
+      <button class="icon-btn panel-toggle mobile-only" type="button" data-panel="layers" title="Calques" aria-label="Calques"></button>
+      <button class="icon-btn panel-toggle mobile-only" type="button" data-panel="history" title="Historique" aria-label="Historique"></button>
     </div>
   </header>
 
@@ -86,6 +89,7 @@
 <div id="modal-root"></div>
 <input type="file" id="file-open" accept="image/*,.psd,.psb,image/vnd.adobe.photoshop" multiple hidden>
 <input type="file" id="file-import" accept="image/*" multiple hidden>
+<input type="color" id="color-input" class="vh" tabindex="-1" aria-hidden="true">
 
 <script type="module" src="js/main.js"></script>
 </body>

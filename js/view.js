@@ -16,6 +16,8 @@ export class Viewport {
     this.pinch = null;
     this.suppress = false;
     this.spaceHeld = false;
+    this.hover = null;   // position de la souris / du stylet (écran)
+    this.lastPt = null;  // dernier point pendant une action
     this.cssW = 1; this.cssH = 1; this.dpr = 1;
     this._raf = 0;
     this.checker = this._makeChecker();
@@ -25,7 +27,7 @@ export class Viewport {
     canvas.addEventListener('pointermove', e => this.onMove(e));
     canvas.addEventListener('pointerup', e => this.onUp(e, false));
     canvas.addEventListener('pointercancel', e => this.onUp(e, true));
-    canvas.addEventListener('pointerleave', () => app.setCursorInfo(null));
+    canvas.addEventListener('pointerleave', () => { app.setCursorInfo(null); this.hover = null; this.requestRender(); });
     canvas.addEventListener('wheel', e => this.onWheel(e), { passive: false });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
     for (const t of ['gesturestart', 'gesturechange', 'gestureend']) canvas.addEventListener(t, e => e.preventDefault());
@@ -93,6 +95,11 @@ export class Viewport {
     const v = this.doc.view;
     return { x: (p.x - v.panX) / v.zoom, y: (p.y - v.panY) / v.zoom };
   }
+  toScreen(p) {
+    const v = this.doc.view;
+    return { x: p.x * v.zoom + v.panX, y: p.y * v.zoom + v.panY };
+  }
+  get toolImpl() { return this.spaceHeld ? null : this.app.tools[this.app.tool] || null; }
 
   // ——— Rendu ———
   requestRender() {
@@ -145,6 +152,9 @@ export class Viewport {
       ctx.strokeRect(Math.round(panX + r.x * zoom) + 0.5, Math.round(panY + r.y * zoom) + 0.5, Math.round(r.w * zoom), Math.round(r.h * zoom));
       ctx.restore();
     }
+    // Repères de l'outil (cercle du pinceau, cadre de recadrage, ligne du dégradé…)
+    const t = this.app.tools[this.app.tool];
+    if (t?.overlay) t.overlay(ctx, this);
   }
 
   // ——— Souris, stylet, doigts ———
@@ -156,6 +166,7 @@ export class Viewport {
     else if (tool === 'hand') c = 'grab';
     else if (tool === 'zoom') c = this.app.opts.zoomOut ? 'zoom-out' : 'zoom-in';
     else if (tool === 'move') c = 'move';
+    else if (this.app.tools[tool]) c = this.app.tools[tool].cursor();
     this.canvas.style.cursor = this.doc ? c : 'default';
   }
 
@@ -176,7 +187,13 @@ export class Viewport {
     if (e.button === 2) return;
     const tool = (e.button === 1 || this.spaceHeld) ? 'hand' : this.app.tool;
     const v = d.view;
-    if (tool === 'hand') {
+    this.lastPt = { ...p, touch: e.pointerType === 'touch' };
+    const impl = tool === 'hand' ? null : this.app.tools[tool];
+    if (impl) {
+      const r = impl.down(this.toDoc(p), e, this);
+      if (r === true) this.action = { type: 'tool', impl };
+      this.requestRender();
+    } else if (tool === 'hand') {
       this.action = { type: 'pan', sx: p.x, sy: p.y, px: v.panX, py: v.panY };
     } else if (tool === 'zoom') {
       this.action = { type: 'zoom', sx: p.x, sy: p.y, z0: v.zoom, out: e.altKey !== this.app.opts.zoomOut, moved: false };
@@ -200,11 +217,26 @@ export class Viewport {
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, p);
     const d = this.doc;
     if (!d) return;
-    if (e.pointerType === 'mouse' || e.pointerType === 'pen') this.app.setCursorInfo(this.toDoc(p));
+    if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+      this.app.setCursorInfo(this.toDoc(p));
+      this.hover = p;
+      if (!this.action && this.app.tools[this.app.tool]?.overlay) this.requestRender();
+    }
     if (this.pinch) { this._updatePinch(); return; }
     const a = this.action;
     if (!a) return;
-    if (a.type === 'pan') {
+    this.lastPt = { ...p, touch: e.pointerType === 'touch' };
+    if (a.type === 'tool') {
+      const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      const r = this.canvas.getBoundingClientRect();
+      const pts = (evs.length ? evs : [e]).map(ev => {
+        const q = this.toDoc({ x: ev.clientX - r.left, y: ev.clientY - r.top });
+        q.pressure = ev.pointerType === 'pen' && ev.pressure > 0 ? ev.pressure : 1;
+        return q;
+      });
+      a.impl.move(this.toDoc(p), e, pts);
+      this.requestRender();
+    } else if (a.type === 'pan') {
       d.view.panX = a.px + p.x - a.sx;
       d.view.panY = a.py + p.y - a.sy;
       this.requestRender();
@@ -239,7 +271,10 @@ export class Viewport {
     this.action = null;
     const d = this.doc;
     if (a && d) {
-      if (a.type === 'move') {
+      if (a.type === 'tool') {
+        a.impl.up(this.toDoc(this._pt(e)), e, cancelled);
+        this.requestRender();
+      } else if (a.type === 'move') {
         if (cancelled || (!a.dx && !a.dy)) d.cancelPreview();
         else this.app.commit('Déplacer', updateLayer(d.committed, a.id, { x: a.x0 + a.dx, y: a.y0 + a.dy }));
         this.requestRender();
@@ -252,6 +287,7 @@ export class Viewport {
 
   _cancelAction() {
     if (this.action?.type === 'move') this.doc?.cancelPreview();
+    if (this.action?.type === 'tool') this.action.impl.cancel?.();
     this.action = null;
     this.requestRender();
   }

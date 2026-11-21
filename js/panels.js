@@ -8,7 +8,7 @@ import { updateLayer, moveLayerTo } from './ops.js';
 const thumbCache = new WeakMap();
 const TH = 40;
 function thumbFor(layer, W, H) {
-  const key = `${layer.x},${layer.y},${W},${H}`;
+  const key = `${layer.x},${layer.y},${W},${H},${layer.canvas?._v || 0}`;
   const c = layer.canvas;
   if (!c || !c.width) return null;
   const hit = thumbCache.get(c);
@@ -116,7 +116,7 @@ export function renderLayers(app) {
     const row = el('div', {
       class: `layer-row ${l.id === d.activeId ? 'active' : ''} ${l.visible ? '' : 'hidden-layer'} ${l.clipping && i > 0 ? 'clipped' : ''}`,
       'data-id': l.id,
-    }, eye, l.clipping && i > 0 ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, el('div', { class: 'lmeta' }, name,
+    }, eye, l.clipping && i > 0 ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, l.text ? el('span', { class: 'text-badge', title: 'Calque de texte (outil Texte pour le modifier)' }, 'T') : null, el('div', { class: 'lmeta' }, name,
       (l.blend !== 'normal' || l.opacity < 1) ? el('small', {}, `${blendLabel(l.blend)}${l.opacity < 1 ? ` · ${Math.round(l.opacity * 100)} %` : ''}`) : null), grip);
 
     eye.addEventListener('click', (e) => {
@@ -251,25 +251,27 @@ export const TOOLS = [
   { id: 'marquee', icon: 'marquee', label: 'Rectangle de sélection', key: 'M', step: 3 },
   { id: 'lasso', icon: 'lasso', label: 'Lasso', key: 'L', step: 3 },
   { id: 'wand', icon: 'wand', label: 'Baguette magique', key: 'W', step: 3 },
-  { id: 'crop', icon: 'crop', label: 'Recadrage', key: 'C', step: 2 },
-  { id: 'eyedropper', icon: 'eyedropper', label: 'Pipette', key: 'I', step: 2 },
+  { id: 'crop', icon: 'crop', label: 'Recadrage', key: 'C' },
+  { id: 'eyedropper', icon: 'eyedropper', label: 'Pipette', key: 'I' },
   '-',
   { id: 'heal', icon: 'heal', label: 'Correcteur', key: 'J', step: 5 },
-  { id: 'brush', icon: 'brush', label: 'Pinceau', key: 'B', step: 2 },
+  { id: 'brush', icon: 'brush', label: 'Pinceau', key: 'B' },
   { id: 'stamp', icon: 'stamp', label: 'Tampon de duplication', key: 'S', step: 5 },
-  { id: 'eraser', icon: 'eraser', label: 'Gomme', key: 'E', step: 2 },
-  { id: 'gradient', icon: 'gradient', label: 'Dégradé', key: 'G', step: 2 },
-  { id: 'bucket', icon: 'bucket', label: 'Pot de peinture', key: 'G', step: 2 },
+  { id: 'eraser', icon: 'eraser', label: 'Gomme', key: 'E' },
+  { id: 'gradient', icon: 'gradient', label: 'Dégradé', key: 'G' },
+  { id: 'bucket', icon: 'bucket', label: 'Pot de peinture', key: 'Maj+G' },
   '-',
-  { id: 'text', icon: 'text', label: 'Texte', key: 'T', step: 2 },
-  { id: 'shapes', icon: 'shapes', label: 'Formes', key: 'U', step: 2 },
+  { id: 'text', icon: 'text', label: 'Texte', key: 'T' },
+  { id: 'shapes', icon: 'shapes', label: 'Formes', key: 'U' },
   '-',
   { id: 'hand', icon: 'hand', label: 'Main', key: 'H' },
   { id: 'zoom', icon: 'zoom', label: 'Zoom', key: 'Z' },
 ];
 
 export function initToolbar(app) {
-  const bar = $('#toolbar');
+  const root = $('#toolbar');
+  const bar = el('div', { class: 'tools-scroll' });
+  root.append(bar);
   for (const t of TOOLS) {
     if (t === '-') { bar.append(el('div', { class: 'tool-sep' })); continue; }
     const title = t.step ? `${t.label} — arrive à l'étape ${t.step}` : `${t.label} (${t.key})`;
@@ -277,28 +279,29 @@ export function initToolbar(app) {
     b.addEventListener('click', () => app.setTool(t.id));
     bar.append(b);
   }
+  // Couleurs de premier plan / d'arrière-plan
+  const fg = el('button', { type: 'button', class: 'sw sw-fg', title: 'Couleur de premier plan', 'aria-label': 'Couleur de premier plan' });
+  const bg = el('button', { type: 'button', class: 'sw sw-bg', title: "Couleur d'arrière-plan", 'aria-label': "Couleur d'arrière-plan" });
+  const swap = el('button', { type: 'button', class: 'sw-mini sw-swap', title: 'Inverser les couleurs (X)', 'aria-label': 'Inverser les couleurs' }, '⇄');
+  const reset = el('button', { type: 'button', class: 'sw-mini sw-reset', title: 'Noir et blanc (D)', 'aria-label': 'Couleurs par défaut' }, el('i'), el('i'));
+  fg.addEventListener('click', () => app.pickColor('fg'));
+  bg.addEventListener('click', () => app.pickColor('bg'));
+  swap.addEventListener('click', () => app.swapColors());
+  reset.addEventListener('click', () => app.resetColors());
+  bar.append(el('div', { class: 'tool-sep' }), el('div', { class: 'swatches' }, bg, fg, swap, reset));
   bar.append(el('div', { class: 'tool-spacer' }));
-  // Sur téléphone : annuler / rétablir à portée de pouce
-  for (const [action, ic, label] of [['undo', 'undo', 'Annuler'], ['redo', 'redo', 'Rétablir']]) {
-    const b = el('button', { type: 'button', class: 'tool mobile-only', 'data-action': action, title: label, 'aria-label': label, html: icon(ic, 20) });
-    b.addEventListener('click', () => app.run(action));
-    bar.append(b);
-  }
-  bar.append(el('div', { class: 'tool-gap mobile-only' }));
-  for (const [id, ic, label] of [['layers', 'layers', 'Calques'], ['history', 'history', 'Historique']]) {
-    const b = el('button', { type: 'button', class: 'tool mobile-only panel-toggle', 'data-panel': id, title: label, 'aria-label': label, html: icon(ic, 20) });
-    b.addEventListener('click', () => app.togglePanel(id));
-    bar.append(b);
+  // Sur téléphone : boutons Calques / Historique dans la barre du haut
+  for (const b of document.querySelectorAll('#topbar .panel-toggle')) {
+    b.innerHTML = icon(b.dataset.panel, 20);
+    b.addEventListener('click', () => app.togglePanel(b.dataset.panel));
   }
 }
 
 export function renderToolbar(app) {
   for (const b of $('#toolbar').querySelectorAll('[data-tool]')) b.classList.toggle('active', b.dataset.tool === app.tool);
-  for (const b of $('#toolbar').querySelectorAll('[data-panel]')) b.classList.toggle('active', app.panelOpen === b.dataset.panel);
-  for (const b of $('#toolbar').querySelectorAll('[data-action]')) {
-    const a = app.actions[b.dataset.action];
-    b.disabled = !(a && (!a.enabled || a.enabled()));
-  }
+  for (const b of document.querySelectorAll('.panel-toggle')) b.classList.toggle('active', app.panelOpen === b.dataset.panel);
+  $('#toolbar .sw-fg').style.background = app.colors.fg;
+  $('#toolbar .sw-bg').style.background = app.colors.bg;
 }
 
 // ——— Barre d'options (selon l'outil) ———
@@ -322,6 +325,8 @@ export function renderOptions(app) {
     bar.append(el('span', { class: 'opt-hint' }, 'Flèches : décaler de 1 px (Maj : 10 px)'));
   } else if (app.tool === 'hand') {
     bar.append(btn('100 %', 'zoom100'), btn("Taille de l'écran", 'fit'));
+  } else if (app.tools[app.tool]) {
+    app.tools[app.tool].options(bar);
   } else if (app.tool === 'zoom') {
     const seg = el('div', { class: 'seg' });
     for (const [v, label] of [[false, 'Zoom avant'], [true, 'Zoom arrière']]) {

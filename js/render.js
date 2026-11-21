@@ -6,7 +6,8 @@ import { blendOp, newCanvas, ctxOf } from './util.js';
  * (ox, oy) = coordonnées du document qui correspondent au coin haut-gauche de `target`.
  * `scratch` = toile de travail réutilisable (pour les masques d'écrêtage). Retourne la toile de travail.
  */
-export function drawStack(target, layers, ox = 0, oy = 0, scratch = null) {
+export function drawStack(target, layers, ox = 0, oy = 0, scratch = null, override = null) {
+  const cv = (L) => (override && override.get(L.id)) || L.canvas;
   const ctx = ctxOf(target);
   let tmp = scratch;
   for (let i = 0; i < layers.length; i++) {
@@ -20,17 +21,17 @@ export function drawStack(target, layers, ox = 0, oy = 0, scratch = null) {
     if (!vis.length) {
       ctx.globalAlpha = L.opacity;
       ctx.globalCompositeOperation = blendOp(L.blend);
-      ctx.drawImage(L.canvas, L.x - ox, L.y - oy);
+      ctx.drawImage(cv(L), L.x - ox, L.y - oy);
     } else {
       if (!tmp || tmp.width !== target.width || tmp.height !== target.height) tmp = newCanvas(target.width, target.height);
       const t = ctxOf(tmp);
       t.save();
       t.clearRect(0, 0, tmp.width, tmp.height);
-      t.drawImage(L.canvas, L.x - ox, L.y - oy);
+      t.drawImage(cv(L), L.x - ox, L.y - oy);
       for (const c of vis) {
         t.globalAlpha = c.opacity;
         t.globalCompositeOperation = 'source-atop';
-        t.drawImage(c.canvas, c.x - ox, c.y - oy);
+        t.drawImage(cv(c), c.x - ox, c.y - oy);
       }
       t.restore();
       ctx.globalAlpha = L.opacity;
