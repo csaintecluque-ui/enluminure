@@ -1,6 +1,6 @@
 // Enluminure — outils communs (toiles, limites, modes de fusion)
 
-export const VERSION = '0.6.1';
+export const VERSION = '0.6.2';
 
 export const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);

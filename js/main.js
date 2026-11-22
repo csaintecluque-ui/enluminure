@@ -416,6 +416,7 @@ class App {
       zoomOut: { enabled: hasDoc, run: () => this.view.zoomStep(-1) },
       fit: { enabled: hasDoc, run: () => this.view.fit(false) },
       zoom100: { enabled: hasDoc, run: () => this.view.actualPixels() },
+      darkTheme: { checked: () => document.documentElement.dataset.theme === 'dark', run: () => this.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark') },
       bounds: { checked: () => this.opts.showBounds, run: () => { this.opts.showBounds = !this.opts.showBounds; this.saveOpts(); renderOptions(this); this.view.requestRender(); } },
       fullscreen: { enabled: () => !!document.documentElement.requestFullscreen, checked: () => !!document.fullscreenElement, run: () => {
         if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {});
@@ -574,6 +575,7 @@ class App {
         { label: '100 % (pixels réels)', action: 'zoom100', key: K('Ctrl+1') },
         '-',
         { label: 'Bords du calque', action: 'bounds' },
+        { label: 'Thème sombre', action: 'darkTheme' },
         { label: 'Plein écran', action: 'fullscreen', key: 'F11' },
       ] },
       { label: 'Aide', items: [
@@ -847,6 +849,16 @@ class App {
       navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasToBlob(clip.canvas, 'image/png') })]).then(() => { clip.sync = 'ok'; }, only);
     } catch { only(); }
     return true;
+  }
+
+  /** Thème clair (par défaut) ou sombre ; le choix est gardé sur l'appareil. */
+  setTheme(t) {
+    t = t === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem('enluminure.theme', t); } catch {}
+    const m = document.querySelector('meta[name=theme-color]');
+    if (m) m.content = t === 'dark' ? '#1B1512' : '#F4ECDD';
+    this.view.requestRender();
   }
 
   /** Vrai si notre copie est plus récente que ce que contient le presse-papiers du système (envoi en cours, ou refusé il y a peu). */
@@ -1442,7 +1454,7 @@ class App {
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
       el('p', { class: 'muted' }, 'Étape 6 — IA locale : sujet, suppression de l\'arrière-plan, sélection d\'objet, gomme magique, remplissage d\'après le contenu et agrandissement, calculés sur votre appareil.'),
-      el('p', { class: 'muted' }, 'Version 0.6.1 : grande vérification de toutes les fonctions et corrections.'),
+      el('p', { class: 'muted' }, 'Version 0.6.2 : thème clair par défaut (Affichage › Thème sombre pour revenir au noir), après la grande vérification de la 0.6.1.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT). IA : transformers.js (Apache 2.0) et ONNX Runtime (MIT) ; modèles RMBG 1.4 (BRIA AI, usage non commercial), SAM 2.1 (Meta), MI-GAN (Picsart), Real-ESRGAN (Xintao Wang).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }

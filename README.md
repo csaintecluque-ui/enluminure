@@ -97,6 +97,10 @@ Toutes les fonctions ont été repassées une par une (menus, outils, raccourcis
 
 Non vérifié sur de vrais appareils : Safari (iPhone, iPad, Mac) et Firefox.
 
+## Version 0.6.2 — thème clair
+
+L'appli s'ouvre maintenant en clair, aux couleurs du parchemin. Le fond noir reste disponible : Affichage › Thème sombre. Le choix est gardé sur l'appareil.
+
 ## Feuille de route
 
 1. Le socle ✔

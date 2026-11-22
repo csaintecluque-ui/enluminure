@@ -139,7 +139,7 @@ export class Viewport {
     const { zoom, panX, panY } = d.view;
     const w = d.width * zoom, h = d.height * zoom;
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 22; ctx.shadowOffsetY = 3;
+    ctx.shadowColor = document.documentElement.dataset.theme === 'light' ? 'rgba(70,48,26,.38)' : 'rgba(0,0,0,.6)'; ctx.shadowBlur = 22; ctx.shadowOffsetY = 3;
     ctx.fillStyle = '#000'; ctx.fillRect(panX, panY, w, h);
     ctx.restore();
     ctx.fillStyle = this.checker;
