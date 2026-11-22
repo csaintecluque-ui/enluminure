@@ -7,7 +7,7 @@ import {
   renderText, ensureFont, renderShape, FONTS, rgba, lumOf, selIn,
 } from './paint.js';
 import { applyBuf } from './document.js';
-import { isGroup, moveItems, effectiveVisible } from './tree.js';
+import { isGroup, isAdjust, moveItems, effectiveVisible } from './tree.js';
 import { selRect, selPolygon, selFromRegion, combineSel, moveSel, selContains, cutOut, clipSelToDoc, featherSel, alphaBounds } from './selection.js';
 import { openDialog, field, toast } from './ui.js';
 
@@ -86,7 +86,7 @@ class Tool {
     const L = d?.committed.layers.find(l => l.id === d.activeId);
     if (!L) { toast('Choisissez d\'abord un calque.'); return null; }
     if (!effectiveVisible(d.committed.layers, L)) { toast('Ce calque est masqué : affichez-le pour le modifier.'); return null; }
-    if (isGroup(L) && !(d.target === 'mask' && L.mask)) { toast('Choisissez un calque, pas un groupe.'); return null; }
+    if ((isGroup(L) || isAdjust(L)) && !(d.target === 'mask' && L.mask)) { toast(isAdjust(L) ? 'Un calque de réglage n\'a pas de pixels : peignez sur son masque ou choisissez un autre calque.' : 'Choisissez un calque, pas un groupe.'); return null; }
     return L;
   }
   /** Cible préparée (pixels du calque ou masque), ou null. */
@@ -979,6 +979,7 @@ class TransformTool extends Tool {
     const st = d.committed, L = st.layers.find(l => l.id === d.activeId);
     if (!L) { toast('Choisissez un calque.'); return false; }
     if (isGroup(L)) { toast('La transformation d\'un groupe arrivera plus tard : choisissez un calque.'); return false; }
+    if (isAdjust(L) || !L.canvas) { toast('Choisissez un calque de pixels.'); return false; }
     if (!effectiveVisible(st.layers, L)) { toast('Ce calque est masqué.'); return false; }
     let src, rect;
     if (st.selection) {

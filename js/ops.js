@@ -1,7 +1,7 @@
 // Enluminure — opérations sur les états (chaque fonction renvoie un NOUVEL état)
 import { newCanvas, ctxOf, mkLayer } from './util.js';
 import { drawStack, flattenState, layerRect, unionRect } from './render.js';
-import { isGroup, insertAbove, removeItems, duplicateItem, siblingsOf, descendants, effectiveVisible, normalize } from './tree.js';
+import { isGroup, isAdjust, insertAbove, removeItems, duplicateItem, siblingsOf, descendants, effectiveVisible, normalize } from './tree.js';
 
 const withLayers = (st, layers) => ({ ...st, layers: normalize(layers) });
 
@@ -36,8 +36,8 @@ export function lowerSibling(st, id) {
 export function mergeDown(st, id) {
   const up = st.layers.find(x => x.id === id);
   const low = lowerSibling(st, id);
-  if (!up || !low || isGroup(up) || isGroup(low)) return null;
-  const r = unionRect(layerRect(low), layerRect(up));
+  if (!up || !low || isGroup(up) || isGroup(low) || isAdjust(low) || !low.canvas) return null;
+  const r = isAdjust(up) ? layerRect(low) : unionRect(layerRect(low), layerRect(up));
   const c = newCanvas(r.w, r.h);
   // Le calque du dessous est dessiné « à plat », celui du dessus avec son mode et son opacité (masques appliqués)
   const lowFlat = { ...low, opacity: 1, blend: 'normal', clipping: false, visible: true, parent: null };

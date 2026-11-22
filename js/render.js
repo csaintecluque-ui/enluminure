@@ -1,6 +1,7 @@
 // Enluminure — composition des calques : groupes, masques, modes de fusion, masques d'écrêtage
 import { blendOp, newCanvas, ctxOf, freeCanvas } from './util.js';
-import { buildTree, isGroup } from './tree.js';
+import { buildTree, isGroup, isAdjust } from './tree.js';
+import { applyAdjust } from './adjust.js';
 
 /** Réserve de toiles de travail de la taille de la cible (réutilisées d'une image à l'autre). */
 export class ScratchPool {
@@ -112,6 +113,35 @@ function renderIsolated(target, node, e) {
   return t;
 }
 
+/** Calque de réglage : modifie ce qui est déjà dessiné dans `target` (zone à recalculer seulement). */
+function applyAdjustLayer(target, L, e, atop = false) {
+  let r = { x: 0, y: 0, w: target.width, h: target.height };
+  if (e.clip) {
+    const x = Math.max(0, e.clip.x - e.ox), y = Math.max(0, e.clip.y - e.oy);
+    r = { x, y, w: Math.min(target.width, e.clip.x - e.ox + e.clip.w) - x, h: Math.min(target.height, e.clip.y - e.oy + e.clip.h) - y };
+    if (r.w <= 0 || r.h <= 0) return;
+  }
+  let out;
+  try { out = applyAdjust(target, L.adjust, r); } catch (err) { console.warn(err); return; }
+  const ctx = ctxOf(target);
+  ctx.save();
+  const m = L.mask && !L.mask.disabled ? L.mask : null;
+  if (!m && L.opacity >= 1 && (L.blend === 'normal' || !L.blend) && !atop) {
+    ctx.clearRect(r.x, r.y, r.w, r.h);
+    ctx.drawImage(out, r.x, r.y);
+  } else {
+    let src = out;
+    if (m) {
+      const mc = (e.override && e.override.get(`mask:${L.id}`)) || m.canvas;
+      src = maskedCanvas({ mask: m, x: r.x + e.ox, y: r.y + e.oy }, out, mc, true);
+    }
+    ctx.globalAlpha = L.opacity;
+    ctx.globalCompositeOperation = L.blend && L.blend !== 'normal' ? blendOp(L.blend) : 'source-atop';
+    ctx.drawImage(src, r.x, r.y);
+  }
+  ctx.restore();
+}
+
 function renderLevel(target, nodes, e) {
   const ctx = ctxOf(target);
   for (let i = 0; i < nodes.length; i++) {
@@ -120,6 +150,7 @@ function renderLevel(target, nodes, e) {
     const clipped = [];
     for (let j = i + 1; j < nodes.length && nodes[j].layer.clipping; j++) clipped.push(nodes[j]);
     if (!L.visible) continue;
+    if (isAdjust(L)) { applyAdjustLayer(target, L, e); continue; }
     const vis = clipped.filter(c => c.layer.visible);
     const group = isGroup(L);
     const passThrough = group && L.blend === 'pass through' && L.opacity >= 1 && !(L.mask && !L.mask.disabled);
@@ -141,6 +172,7 @@ function renderLevel(target, nodes, e) {
     if (vis.length) {
       const tctx = ctxOf(t);
       for (const c of vis) {
+        if (isAdjust(c.layer)) { applyAdjustLayer(t, c.layer, e, true); continue; }
         const ct = c.children ? renderIsolated(target, c, e) : null;
         const src = ct || contentOf(c.layer, e);
         if (!src) continue;

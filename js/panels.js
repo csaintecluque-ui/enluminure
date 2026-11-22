@@ -3,7 +3,8 @@ import { el, BLENDS, blendSupported, fmtBytes, clamp } from './util.js';
 import { icon } from './icons.js';
 import { $ } from './ui.js';
 import { updateLayer } from './ops.js';
-import { buildTree, isGroup, descendants, placeRelative } from './tree.js';
+import { buildTree, isGroup, isAdjust, descendants, placeRelative } from './tree.js';
+import { ADJ } from './adjust.js';
 
 // ——— Vignettes des calques (mises en cache : les toiles ne changent jamais) ———
 const thumbCache = new WeakMap();
@@ -75,6 +76,7 @@ export function initLayersPanel(app) {
     ['newLayer', 'newLayer', 'Nouveau calque (Ctrl+Maj+N)'],
     ['newGroup', 'folder', 'Nouveau groupe (Ctrl+G : grouper la sélection)'],
     ['maskReveal', 'mask', 'Ajouter un masque de fusion (depuis la sélection s\'il y en a une)'],
+    ['newAdjustLayer', 'adjust', 'Nouveau calque de réglage'],
     ['duplicateLayer', 'duplicate', 'Dupliquer (Ctrl+J)'],
     ['layerUp', 'up', 'Monter (Ctrl+])'],
     ['layerDown', 'down', 'Descendre (Ctrl+[)'],
@@ -159,7 +161,10 @@ function layerRow(app, d, l, depth, clipped, dim) {
   const grip = el('span', { class: 'grip', title: 'Glisser pour réorganiser', html: icon('grip', 16) });
   const onMask = d.target === 'mask' && l.id === d.activeId;
   let twisty = null, thumb, mthumb = null;
-  if (group) {
+  if (isAdjust(l)) {
+    thumb = el('span', { class: `thumb folder adj-thumb ${!onMask && l.id === d.activeId ? 'target' : ''}`, title: 'Calque de réglage — double-clic : modifier', html: icon('adjust', 22) });
+    thumb.addEventListener('dblclick', (e) => { e.stopPropagation(); app.editAdjust(l.id); });
+  } else if (group) {
     const open = !d.collapsed.has(l.id);
     twisty = el('button', { type: 'button', class: 'twisty', title: open ? 'Replier' : 'Déplier', html: open ? '▾' : '▸' });
     twisty.addEventListener('click', (e) => { e.stopPropagation(); if (open) d.collapsed.add(l.id); else d.collapsed.delete(l.id); app.refresh({ history: false }); });
@@ -194,7 +199,7 @@ function layerRow(app, d, l, depth, clipped, dim) {
   }, eye, twisty, clipped ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, mthumb,
   l.text ? el('span', { class: 'text-badge', title: 'Calque de texte (outil Texte pour le modifier)' }, 'T') : null,
   el('div', { class: 'lmeta' }, name,
-    (l.blend !== 'normal' && l.blend !== 'pass through') || l.opacity < 1 ? el('small', {}, `${blendLabel(l.blend)}${l.opacity < 1 ? ` · ${Math.round(l.opacity * 100)} %` : ''}`) : null), grip);
+    (isAdjust(l) && ADJ[l.adjust.type]?.label !== l.name) || (l.blend !== 'normal' && l.blend !== 'pass through') || l.opacity < 1 ? el('small', {}, [isAdjust(l) && ADJ[l.adjust.type]?.label !== l.name ? ADJ[l.adjust.type]?.label : '', (l.blend !== 'normal' && l.blend !== 'pass through') ? blendLabel(l.blend) : '', l.opacity < 1 ? `${Math.round(l.opacity * 100)} %` : ''].filter(Boolean).join(' · ')) : null), grip);
 
   eye.addEventListener('click', (e) => {
     e.stopPropagation();

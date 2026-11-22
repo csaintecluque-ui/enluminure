@@ -13,7 +13,7 @@ Tout se passe sur l'appareil : aucune image n'est envoyée sur internet.
 - Enregistrement en .psd avec les calques, export JPG / PNG / WebP (qualité, taille)
 - Raccourcis clavier de Photoshop
 
-Limite connue : les calques de réglage d'un PSD sont ignorés (étape 4).
+Limite connue : quelques réglages Photoshop rares (mélangeur de couches, correction sélective, table de correspondance) sont ignorés à l'ouverture d'un PSD.
 
 ## Étape 2 — les outils de base
 
@@ -27,7 +27,7 @@ Limite connue : les calques de réglage d'un PSD sont ignorés (étape 4).
 - Édition : remplir avec le premier plan / l'arrière-plan, effacer le calque
 - Historique de la peinture par zones modifiées : l'annulation reste illimitée sans saturer la mémoire
 
-## Étape 3 — sélections, masques, transformation, groupes (v0.3.0)
+## Étape 3 — sélections, masques, transformation, groupes
 
 - Sélections : rectangle, ellipse, lasso, lasso polygonal, baguette magique (tolérance, contigu, tous les calques)
 - Modes nouvelle / ajouter (Maj) / soustraire (Alt) / intersection (Maj+Alt), contour progressif, pointillés animés
@@ -39,12 +39,21 @@ Limite connue : les calques de réglage d'un PSD sont ignorés (étape 4).
 - Groupes de calques : créer, grouper / dissocier, replier, glisser des calques dedans, opacité / mode / masque du groupe, fusionner un groupe, sélection multiple de calques
 - PSD : les groupes et les masques sont lus et enregistrés
 
+## Étape 4 — réglages et filtres (v0.4.0)
+
+Tout est calculé par la carte graphique (WebGL), par tuiles pour les grandes images.
+
+- Réglages (Image > Réglages), avec aperçu en direct et limités à la sélection : luminosité/contraste, niveaux (histogramme, auto), courbes (par canal), exposition, vibrance, teinte/saturation (et « redéfinir »), balance des couleurs, noir et blanc (paramètres prédéfinis, teinte), filtre photo, négatif, postérisation, seuil, courbe de transfert de dégradé
+- Commandes rapides : niveaux, contraste et couleur automatiques, désaturation, négatif (aussi sur un masque)
+- Calques de réglage non destructifs : modifiables à tout moment (double-clic sur la vignette), avec masque, opacité, mode de fusion, écrêtage ; lus et enregistrés en PSD
+- Filtres (menu Filtre) : flou gaussien, flou directionnel, accentuation, ajout de bruit, réduction du bruit, mosaïque, vignettage ; Dernier filtre (Ctrl+F)
+
 ## Feuille de route
 
 1. Le socle ✔
 2. Outils de base : pinceau (pression du stylet), gomme, pot de peinture, dégradé, texte, formes, pipette, recadrage ✔
 3. Sélections et masques : rectangle, lasso, baguette magique, masques de calque, transformation libre, groupes ✔
-4. Réglages et filtres : niveaux, courbes, teinte / saturation, calques de réglage, flou, netteté
+4. Réglages et filtres : niveaux, courbes, teinte / saturation, calques de réglage, flou, netteté ✔
 5. Outils « pro » : tampon, correcteur, fluidité, styles de calque, objets dynamiques
 6. IA locale : détourage, sélection d'objet, gomme magique, agrandissement, remplissage intelligent
 
@@ -70,6 +79,9 @@ Aucune compilation : ce sont des fichiers HTML, CSS et JavaScript prêts à l'em
 | `js/paint.js` | Moteur de peinture, remplissage, dégradés, rendu du texte et des formes |
 | `js/selection.js` | Sélections : création, combinaisons, contour progressif, pointillés |
 | `js/tree.js` | Groupes de calques : arborescence et réorganisation |
+| `js/gl.js` | Moteur graphique (WebGL) : passes de calcul, tuiles |
+| `js/adjust.js` | Réglages et leurs fenêtres (niveaux, courbes…) |
+| `js/filters.js` | Filtres (flous, accentuation, bruit…) |
 | `js/panels.js` | Panneaux Calques, Historique, outils, onglets |
 | `js/io.js` | Ouverture et enregistrement des fichiers |
 | `vendor/ag-psd.min.js` | Lecture / écriture des PSD (bibliothèque ag-psd, licence MIT) |

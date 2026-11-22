@@ -13,8 +13,12 @@ import { commitPixels, prepareTarget, selIn, lumOf } from './paint.js';
 import { applyBuf } from './document.js';
 import * as tree from './tree.js';
 import * as SEL from './selection.js';
+import { ADJ, ADJ_ORDER, applyAdjust, histogram, autoLUT, LUT_SHADER } from './adjust.js';
+import { FILTERS, FILTER_ORDER } from './filters.js';
+import { glRun } from './gl.js';
 
 const MOD = isMac || isIOS ? '⌘' : 'Ctrl';
+const ADJ_KEYS = { levels: 'Ctrl+L', curves: 'Ctrl+M', huesat: 'Ctrl+U', colorbalance: 'Ctrl+B', bw: 'Ctrl+Alt+Maj+B' };
 const K = (s) => s.replace(/Ctrl/g, MOD);
 
 class App {
@@ -274,7 +278,7 @@ class App {
         this.commit(l.clipping ? "Annuler le masque d'écrêtage" : "Créer un masque d'écrêtage", ops.updateLayer(d.committed, l.id, { clipping: !l.clipping }));
       } },
       toggleVisible: { enabled: hasLayer, run: () => { const d = D(), l = d.active; this.commit(l.visible ? 'Masquer le calque' : 'Afficher le calque', ops.updateLayer(d.committed, l.id, { visible: !l.visible })); } },
-      mergeDown: { enabled: () => hasLayer() && (tree.isGroup(D().active) || (ops.lowerSibling(D().committed, D().activeId) && !tree.isGroup(ops.lowerSibling(D().committed, D().activeId)))), run: () => {
+      mergeDown: { enabled: () => hasLayer() && (tree.isGroup(D().active) || !!ops.lowerSibling(D().committed, D().activeId)?.canvas), run: () => {
         const d = D(), l = d.active;
         if (tree.isGroup(l)) { const r = ops.mergeGroup(d.committed, l.id); if (r) { this.commit('Fusionner le groupe', r.state, { activeId: r.activeId }); this.selectLayer(r.activeId); } return; }
         const low = ops.lowerSibling(d.committed, l.id);
@@ -299,7 +303,7 @@ class App {
         this.commit(l.mask.disabled ? 'Activer le masque' : 'Désactiver le masque', ops.updateLayer(d.committed, l.id, { mask: { ...l.mask, disabled: !l.mask.disabled } }));
       } },
       maskDelete: { enabled: () => !!D()?.active?.mask, run: () => { const d = D(); d.target = 'layer'; this.commit('Supprimer le masque', ops.updateLayer(d.committed, d.activeId, { mask: null })); } },
-      maskApply: { enabled: () => !!D()?.active?.mask && !tree.isGroup(D().active), run: () => {
+      maskApply: { enabled: () => !!D()?.active?.mask && !!D().active.canvas, run: () => {
         const d = D(), l = d.active;
         const m = { ...l.mask, disabled: false };
         const c = newCanvas(l.canvas.width, l.canvas.height);
@@ -327,6 +331,19 @@ class App {
       clearSel: { enabled: () => hasLayer() && !!D().committed.selection, run: () => this.fillLayer(null, 'Effacer') },
       cut: { enabled: () => hasLayer() && !!D().committed.selection && !tree.isGroup(D().active), run: async () => { await this.copy(false); this.fillLayer(null, 'Couper'); } },
       freeTransform: { enabled: hasLayer, run: () => this.startTransform() },
+
+      // ——— Réglages et filtres ———
+      newAdjustLayer: { enabled: hasDoc, run: () => this.pickAdjustLayer() },
+      editAdjust: { enabled: () => tree.isAdjust(D()?.active), run: () => this.editAdjust(D().activeId) },
+      autoLevels: { enabled: () => this.pixelReady(), run: () => this.autoAdjust('levels') },
+      autoContrast: { enabled: () => this.pixelReady(), run: () => this.autoAdjust('contrast') },
+      autoColor: { enabled: () => this.pixelReady(), run: () => this.autoAdjust('color') },
+      desaturate: { enabled: () => this.pixelReady(), run: () => this.quickAdjust('Désaturation', { type: 'huesat', ...ADJ.huesat.defaults(), saturation: -100 }) },
+      invertQuick: { enabled: () => this.pixelReady(true), run: () => (D().target === 'mask' ? this.invertMask() : this.quickAdjust('Négatif', { type: 'invert' })) },
+      lastFilter: { enabled: () => !!this.lastFilter && this.pixelReady(true), run: () => this.applyFilter(this.lastFilter.id, this.lastFilter.params, false) },
+      ...Object.fromEntries(Object.keys(ADJ).map(k => [`adj_${k}`, { enabled: () => this.pixelReady(), run: () => this.adjustDialog(k) }])),
+      ...Object.fromEntries(Object.keys(ADJ).map(k => [`adjLayer_${k}`, { enabled: hasDoc, run: () => this.adjustLayerDialog(k) }])),
+      ...Object.fromEntries(Object.keys(FILTERS).map(k => [`filter_${k}`, { enabled: () => this.pixelReady(true), run: () => this.applyFilter(k, null, true) }])),
 
       zoomIn: { enabled: hasDoc, run: () => this.view.zoomStep(1) },
       zoomOut: { enabled: hasDoc, run: () => this.view.zoomStep(-1) },
@@ -389,11 +406,22 @@ class App {
         { label: 'Symétrie horizontale', action: 'flipH' },
         { label: 'Symétrie verticale', action: 'flipV' },
         '-',
+        { heading: 'Réglages' },
+        ...ADJ_ORDER.map(k => (k === '-' ? '-' : { label: `${ADJ[k].label}…`, action: `adj_${k}`, key: ADJ_KEYS[k] ? K(ADJ_KEYS[k]) : '' })),
+        '-',
+        { label: 'Niveaux automatiques', action: 'autoLevels', key: K('Ctrl+Maj+L') },
+        { label: 'Contraste automatique', action: 'autoContrast', key: K('Ctrl+Alt+Maj+L') },
+        { label: 'Couleur automatique', action: 'autoColor', key: K('Ctrl+Maj+B') },
+        { label: 'Désaturation', action: 'desaturate', key: K('Ctrl+Maj+U') },
+        { label: 'Négatif (inverser)', action: 'invertQuick', key: K('Ctrl+I') },
+        '-',
         { label: "Aplatir l'image", action: 'flatten' },
       ] },
       { label: 'Calque', items: [
         { label: 'Nouveau calque', action: 'newLayer', key: K('Ctrl+Maj+N') },
         { label: 'Nouveau groupe', action: 'newGroup' },
+        { label: 'Nouveau calque de réglage…', action: 'newAdjustLayer' },
+        { label: 'Modifier le réglage…', action: 'editAdjust' },
         { label: 'Dupliquer le calque', action: 'duplicateLayer', key: K('Ctrl+J') },
         { label: 'Calque par copie (sélection)', action: 'layerViaCopy', key: K('Ctrl+J') },
         { label: 'Calque par coupe (sélection)', action: 'layerViaCut', key: K('Ctrl+Maj+J') },
@@ -440,6 +468,14 @@ class App {
         { label: 'Sélection depuis le masque', action: 'selectMask' },
         '-',
         { label: 'Effacer le contenu sélectionné', action: 'clearSel', key: 'Suppr' },
+      ] },
+      { label: 'Filtre', items: [
+        { label: 'Dernier filtre', action: 'lastFilter', key: K('Ctrl+F') },
+        ...FILTER_ORDER.flatMap((k, i) => {
+          const f = FILTERS[k], prev = FILTERS[FILTER_ORDER[i - 1]];
+          const row = { label: `${f.label}…`, action: `filter_${k}` };
+          return !prev || prev.group !== f.group ? [{ heading: f.group }, row] : [row];
+        }),
       ] },
       { label: 'Affichage', items: [
         { label: 'Zoom avant', action: 'zoomIn', key: K('Ctrl++') },
@@ -503,6 +539,9 @@ class App {
       'alt+backspace': 'fillFg', 'alt+delete': 'fillFg', 'ctrl+backspace': 'fillBg', 'ctrl+delete': 'fillBg',
       'ctrl+a': 'selectAll', 'ctrl+d': 'deselect', 'ctrl+shift+d': 'reselect', 'ctrl+shift+i': 'invertSel', 'shift+f6': 'featherSel',
       'ctrl+t': 'freeTransform', 'ctrl+g': 'groupLayers', 'ctrl+shift+g': 'ungroupLayers', 'ctrl+x': 'cut', 'ctrl+shift+j': 'layerViaCut',
+      'ctrl+l': 'adj_levels', 'ctrl+m': 'adj_curves', 'ctrl+u': 'adj_huesat', 'ctrl+b': 'adj_colorbalance', 'ctrl+alt+shift+b': 'adj_bw',
+      'ctrl+i': 'invertQuick', 'ctrl+shift+u': 'desaturate', 'ctrl+shift+l': 'autoLevels', 'ctrl+alt+shift+l': 'autoContrast', 'ctrl+shift+b': 'autoColor',
+      'ctrl+f': 'lastFilter',
     };
     const typing = (t) => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
     document.addEventListener('keydown', (e) => {
@@ -668,6 +707,7 @@ class App {
     if (merged) c = flattenState(d.committed);
     else if (tree.isGroup(d.active)) { const r = ops.mergeGroup(d.committed, d.activeId); c = r.state.layers.find(l => l.id === r.activeId).canvas; }
     else c = d.active.canvas;
+    if (!c) { toast('Ce calque n\'a pas de pixels à copier.'); return; }
     if (sel) {
       const ox = merged || tree.isGroup(d.active) ? 0 : d.active.x, oy = merged || tree.isGroup(d.active) ? 0 : d.active.y;
       const cut = SEL.cutOut(c, ox, oy, sel);
@@ -787,6 +827,190 @@ class App {
   endTransform() {
     this.tool = this.prevTool && this.prevTool !== 'transform' ? this.prevTool : 'move';
     renderOptions(this); renderToolbar(this); this.view.updateCursor();
+  }
+
+  // ——— Réglages et filtres ———
+  /** Calque de pixels prêt à être modifié (ou son masque si `maskOk`). */
+  pixelReady(maskOk = false) {
+    const d = this.doc, L = d?.active;
+    if (!L) return false;
+    if (d.target === 'mask' && L.mask) return maskOk;
+    return !!L.canvas;
+  }
+
+  /**
+   * Fenêtre avec aperçu en direct, puis modification des pixels du calque (ou du masque),
+   * limitée à la sélection. `run(source, zone, réglages)` renvoie la zone modifiée.
+   */
+  async pixelDialog({ title, label, params, ui, run, histo = false, skipDialog = false }) {
+    const d = this.doc, L = d.active;
+    if (!effectiveVisibleL(d, L)) { toast('Ce calque est masqué.'); return; }
+    const P = prepareTarget(d, L.id);
+    if (!P) { toast('Choisissez un calque de pixels.'); return; }
+    const si = selIn(P);
+    const full = { x: 0, y: 0, w: P.canvas.width, h: P.canvas.height };
+    let r = full;
+    if (si) {
+      const x = Math.max(0, si.ox), y = Math.max(0, si.oy);
+      r = { x, y, w: Math.min(full.w, si.ox + si.canvas.width) - x, h: Math.min(full.h, si.oy + si.canvas.height) - y };
+      if (r.w <= 0 || r.h <= 0) { toast('La sélection est en dehors du calque.'); return; }
+    }
+    const pv = newCanvas(full.w, full.h);
+    const pctx = ctxOf(pv);
+    pctx.drawImage(P.canvas, 0, 0);
+    const render = () => {
+      let res;
+      try { res = run(P.canvas, r, params); } catch (err) { console.error(err); toast(err.message, 5000); return false; }
+      pctx.save();
+      pctx.clearRect(r.x, r.y, r.w, r.h);
+      pctx.drawImage(P.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+      if (si) {
+        const t = newCanvas(r.w, r.h);
+        const tctx = ctxOf(t);
+        tctx.drawImage(res, 0, 0);
+        tctx.globalCompositeOperation = 'destination-in';
+        tctx.drawImage(si.canvas, si.ox - r.x, si.oy - r.y);
+        pctx.globalCompositeOperation = P.target === 'mask' ? 'source-over' : 'source-atop';
+        if (P.target === 'mask') { // masque : on remplace la valeur dans la sélection
+          pctx.globalCompositeOperation = 'destination-out';
+          pctx.drawImage(si.canvas, si.ox, si.oy);
+          pctx.globalCompositeOperation = 'lighter';
+        }
+        pctx.drawImage(t, r.x, r.y);
+        t.width = 0;
+      } else {
+        pctx.clearRect(r.x, r.y, r.w, r.h);
+        pctx.drawImage(res, r.x, r.y);
+      }
+      pctx.restore();
+      return true;
+    };
+    let showPreview = true, raf = 0;
+    const update = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!showPreview) { d.cancelPreview(); this.view.requestRender(); return; }
+        if (!render()) return;
+        if (P.state !== d.committed && d.preview !== P.state) d.setPreview(P.state);
+        d.setLive({ layerId: L.id, canvas: pv, target: P.target });
+        this.view.requestRender();
+      });
+    };
+    let ok = true;
+    if (!skipDialog) {
+      const ctx = { histo: histo ? histogram(P.canvas) : null };
+      const prevBox = el('input', { type: 'checkbox', checked: true });
+      prevBox.addEventListener('change', () => { showPreview = prevBox.checked; update(); });
+      const body = el('div', { class: 'form' }, ui(params, update, ctx), el('label', { class: 'opt adj-check' }, prevBox, 'Aperçu'));
+      update();
+      ok = await openDialog({ title, body, floating: true, className: 'adj-dialog', buttons: [{ label: 'Annuler', value: false }, { label: 'OK', primary: true, value: true }] });
+      cancelAnimationFrame(raf); raf = 0;
+    }
+    if (!ok) { d.cancelPreview(); pv.width = 0; this.refresh({ history: false }); return; }
+    await this.withBusy('Application…', async () => {
+      if (!render()) return;
+      commitPixels(this, label, L.id, { x: r.x + P.ox, y: r.y + P.oy, w: r.w, h: r.h }, (ctx, T, rr) => {
+        ctx.clearRect(rr.x, rr.y, rr.w, rr.h);
+        ctx.drawImage(pv, rr.x, rr.y, rr.w, rr.h, rr.x, rr.y, rr.w, rr.h);
+      }, P);
+    });
+    pv.width = 0;
+  }
+
+  adjustDialog(type) {
+    const def = ADJ[type];
+    const params = { type, ...def.defaults(this) };
+    return this.pixelDialog({ title: def.label, label: def.label, params, ui: def.ui, histo: def.histo, run: (src, r, p) => applyAdjust(src, p, r) });
+  }
+
+  quickAdjust(label, adj) {
+    return this.pixelDialog({ title: label, label, params: adj, skipDialog: true, run: (src, r, p) => applyAdjust(src, p, r) });
+  }
+
+  autoAdjust(kind) {
+    const d = this.doc, L = d.active;
+    if (!L?.canvas) return;
+    const H = histogram(L.canvas);
+    const lut = autoLUT(H, kind);
+    const label = { levels: 'Niveaux automatiques', contrast: 'Contraste automatique', color: 'Couleur automatique' }[kind];
+    return this.pixelDialog({ title: label, label, params: {}, skipDialog: true, run: (src, r) => glRun(src, r, [{ frag: LUT_SHADER, lut }]) });
+  }
+
+  /** Négatif d'un masque : ce qui était masqué devient visible et inversement. */
+  invertMask() {
+    const d = this.doc;
+    return this.pixelDialog({
+      title: 'Négatif', label: 'Négatif (masque)', params: {}, skipDialog: true,
+      run: (src, r) => {
+        const t = newCanvas(r.w, r.h);
+        const c = ctxOf(t);
+        c.fillRect(0, 0, r.w, r.h);
+        c.globalCompositeOperation = 'destination-out';
+        c.drawImage(src, -r.x, -r.y);
+        return t;
+      },
+    }).then(() => void d);
+  }
+
+  async applyFilter(id, params, withDialog) {
+    const f = FILTERS[id];
+    const p = params ? structuredClone(params) : (this.filterParams?.[id] ? structuredClone(this.filterParams[id]) : f.defaults());
+    if (id === 'noise') p.seed = Math.random() * 100;
+    await this.pixelDialog({ title: f.label, label: f.label, params: p, ui: f.ui, run: (src, r, pp) => f.run(src, r, pp), skipDialog: !withDialog });
+    this.lastFilter = { id, params: p };
+    this.filterParams = { ...(this.filterParams || {}), [id]: p };
+  }
+
+  /** Nouveau calque de réglage : choix du type. */
+  async pickAdjustLayer() {
+    const grid = el('div', { class: 'adj-pick' });
+    let chosen = null;
+    for (const k of ADJ_ORDER) {
+      if (k === '-') continue;
+      const b = el('button', { type: 'button', class: 'btn' }, ADJ[k].label);
+      b.addEventListener('click', () => { chosen = k; b.closest('form').requestSubmit(); });
+      grid.append(b);
+    }
+    const type = await openDialog({ title: 'Nouveau calque de réglage', body: grid, buttons: [{ label: 'Annuler', value: null }], onSubmit: () => chosen || false });
+    if (type) this.adjustLayerDialog(type);
+  }
+
+  /** Crée (ou modifie) un calque de réglage, avec aperçu en direct sur toute l'image. */
+  async adjustLayerDialog(type, existingId = null) {
+    const d = this.doc;
+    const st0 = d.committed;
+    const existing = existingId ? st0.layers.find(l => l.id === existingId) : null;
+    const def = ADJ[type];
+    const params = existing ? structuredClone(existing.adjust) : { type, ...def.defaults(this) };
+    let layer = existing;
+    if (!layer) {
+      const sel = st0.selection;
+      let mask = null;
+      if (sel) { const c = newCanvas(st0.width, st0.height); ctxOf(c).drawImage(sel.canvas, sel.x, sel.y); mask = { canvas: c, x: 0, y: 0, def: 0, disabled: false }; }
+      layer = mkLayer({ kind: 'adjust', name: def.label, canvas: null, adjust: params, mask });
+    }
+    let raf = 0;
+    const stateWith = () => (existing
+      ? ops.updateLayer(st0, existing.id, { adjust: structuredClone(params) })
+      : ops.insertLayer(st0, { ...layer, adjust: structuredClone(params) }, d.activeId));
+    const update = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; d.setPreview(stateWith()); this.view.requestRender(); });
+    };
+    const ctx = { histo: def.histo ? histogram(d.composite()) : null };
+    update();
+    const ok = await openDialog({ title: `${existing ? 'Modifier' : 'Calque de réglage'} : ${def.label}`, body: def.ui(params, update, ctx), floating: true, className: 'adj-dialog', buttons: [{ label: 'Annuler', value: false }, { label: 'OK', primary: true, value: true }] });
+    cancelAnimationFrame(raf);
+    if (!ok) { d.cancelPreview(); this.refresh({ history: false }); return; }
+    const st = stateWith();
+    this.commit(existing ? `Modifier : ${def.label}` : `Calque de réglage : ${def.label}`, { ...st, selection: existing ? st.selection : null }, { activeId: layer.id });
+    if (!existing) { d.target = layer.mask ? 'mask' : 'layer'; this.selectLayer(layer.id); }
+  }
+
+  editAdjust(id) {
+    const l = this.doc?.committed.layers.find(x => x.id === id);
+    if (tree.isAdjust(l)) this.adjustLayerDialog(l.adjust.type, id);
   }
 
   async savePsd() {
@@ -988,6 +1212,10 @@ class App {
       ['Transformation manuelle', K('Ctrl+T (Entrée / Échap)')],
       ['Grouper / dissocier', K('Ctrl+G · Ctrl+Maj+G')],
       ['Sélection multiple de calques', K('Ctrl+clic · Maj+clic (appui long au doigt)')],
+      ['Niveaux / Courbes / Teinte-saturation / Balance', K('Ctrl+L · Ctrl+M · Ctrl+U · Ctrl+B')],
+      ['Négatif / Désaturation', K('Ctrl+I · Ctrl+Maj+U')],
+      ['Niveaux / contraste / couleur automatiques', K('Ctrl+Maj+L · Ctrl+Alt+Maj+L · Ctrl+Maj+B')],
+      ['Dernier filtre', K('Ctrl+F')],
       ['Remplir premier plan / arrière-plan', K('Alt+Retour arrière · Ctrl+Retour arrière')],
       ['Main temporaire', 'Espace (maintenu) ou clic molette'],
       ['Choisir le calque sous la souris', `${MOD}+clic avec Déplacer`],
@@ -1004,7 +1232,7 @@ class App {
       el('img', { src: 'icons/sceau-enluminure.svg', alt: '', width: 120, height: 120 }),
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
-      el('p', { class: 'muted' }, 'Étape 3 — sélections, masques de calque, transformation manuelle et groupes de calques.'),
+      el('p', { class: 'muted' }, 'Étape 4 — réglages (niveaux, courbes, teinte/saturation…), calques de réglage et filtres, calculés par la carte graphique.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }
@@ -1016,3 +1244,5 @@ window.enluminure = app; // pratique pour le débogage
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+function effectiveVisibleL(d, L) { return !!L && tree.effectiveVisible(d.committed.layers, L); }

@@ -2,7 +2,7 @@
 import { newCanvas, ctxOf, bump, clamp, freeCanvas } from './util.js';
 import { layerRect, unionRect } from './render.js';
 import { updateLayer } from './ops.js';
-import { isGroup } from './tree.js';
+import { isGroup, isAdjust } from './tree.js';
 import { applyBuf } from './document.js';
 
 // ——— Couleurs ———
@@ -76,7 +76,7 @@ export function prepareTarget(doc, layerId) {
   const L = doc.committed.layers.find(l => l.id === layerId);
   if (!L) return null;
   if (doc.target === 'mask' && L.mask) return ensureMaskPaintable(doc, layerId);
-  if (isGroup(L)) return null;
+  if (isGroup(L) || isAdjust(L) || !L.canvas) return null;
   return ensurePaintable(doc, layerId);
 }
 

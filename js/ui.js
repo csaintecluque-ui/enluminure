@@ -56,8 +56,8 @@ export function openDialog({ title, body, buttons, onSubmit, wide = false, class
     document.addEventListener('keydown', onKey, true);
     requestAnimationFrame(() => {
       const f = form.querySelector('textarea, input:not([type=hidden]):not([disabled]), select');
-      if (f && !matchMedia('(pointer: coarse)').matches) { f.focus(); f.select?.(); }
-      else form.querySelector('button.primary')?.focus();
+      if (matchMedia('(pointer: coarse)').matches) { form.scrollTop = 0; return; } // au doigt : pas de clavier ni de défilement imposés
+      if (f) { f.focus(); f.select?.(); } else form.querySelector('button.primary')?.focus();
     });
   });
 }

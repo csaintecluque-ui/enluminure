@@ -5,6 +5,7 @@
 import { uid } from './util.js';
 
 export const isGroup = (l) => !!l && l.kind === 'group';
+export const isAdjust = (l) => !!l && l.kind === 'adjust';
 
 /** Arbre (du bas vers le haut à chaque niveau) : [{ layer, children? }]. */
 export function buildTree(layers) {

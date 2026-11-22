@@ -2,7 +2,8 @@
 import { newCanvas, ctxOf, mkLayer, limitScale, isIOS, isTouch, baseName, canvasToBlob } from './util.js';
 import { Doc } from './document.js';
 import { flattenState } from './render.js';
-import { buildTree, normalize } from './tree.js';
+import { buildTree, normalize, isAdjust } from './tree.js';
+import { ADJ, PSD_TYPES } from './adjust.js';
 import { scaleCanvas } from './ops.js';
 
 let agPsdPromise = null;
@@ -129,7 +130,18 @@ export async function openPsd(file) {
         out.push(g);
         continue;
       }
-      if (ch.adjustment) { adjust++; continue; }
+      if (ch.adjustment) {
+        const type = PSD_TYPES[ch.adjustment.type];
+        if (!type) { adjust++; continue; }
+        let params;
+        try { params = { type, ...ADJ[type].fromPsd(ch.adjustment) }; } catch { adjust++; continue; }
+        out.push(mkLayer({
+          kind: 'adjust', name: ch.name || ADJ[type].label, canvas: null, adjust: params, parent,
+          opacity: ch.opacity ?? 1, blend: ch.blendMode || 'normal', visible: !ch.hidden,
+          clipping: !!ch.clipping, mask: maskFromPsd(ch.mask),
+        }));
+        continue;
+      }
       if (ch.text) texts++;
       let canvas = ch.canvas;
       let x = ch.left ?? 0, y = ch.top ?? 0;
@@ -143,8 +155,8 @@ export async function openPsd(file) {
   };
   walk(psd.children, null);
   if (!out.length && psd.canvas) out.push(mkLayer({ name: 'Arrière-plan', canvas: psd.canvas }));
-  if (!out.some(l => l.kind !== 'group')) throw new Error('Ce PSD ne contient aucune image lisible.');
-  if (adjust) notes.push(`${adjust} calque(s) de réglage ignoré(s) pour l'instant (étape 4).`);
+  if (!out.some(l => l.canvas)) throw new Error('Ce PSD ne contient aucune image lisible.');
+  if (adjust) notes.push(`${adjust} calque(s) de réglage d'un type pas encore géré (mélangeur de couches, correction sélective…) ignoré(s).`);
   if (texts) notes.push(`${texts} calque(s) de texte ouverts comme images.`);
   void groups;
   const doc = new Doc({ name: baseName(file.name), width: psd.width, height: psd.height, layers: normalize(out), label: 'Ouverture' });
@@ -156,7 +168,10 @@ export async function openPsd(file) {
 export async function docToPsdBlob(doc) {
   const ag = await loadPsdLib();
   const st = doc.committed;
-  const toPsd = (nodes) => nodes.map(({ layer: l, children }) => (children ? {
+  const toPsd = (nodes) => nodes.map(({ layer: l, children }) => (isAdjust(l) ? {
+    name: l.name, opacity: l.opacity, blendMode: l.blend, hidden: !l.visible, clipping: l.clipping,
+    mask: maskToPsd(l.mask), adjustment: ADJ[l.adjust.type].toPsd(l.adjust),
+  } : children ? {
     name: l.name, opacity: l.opacity, blendMode: l.blend, hidden: !l.visible, clipping: l.clipping, opened: true,
     mask: maskToPsd(l.mask), children: toPsd(children),
   } : {
