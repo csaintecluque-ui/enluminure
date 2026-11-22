@@ -1,5 +1,5 @@
 // Enluminure — document, historique (annuler / rétablir) et gestion mémoire
-import { uid, freeCanvas, LIMITS, newCanvas, bump } from './util.js';
+import { uid, freeCanvas, LIMITS, newCanvas, bump, cleanCtx } from './util.js';
 import { drawStack, ScratchPool } from './render.js';
 
 /**
@@ -19,6 +19,7 @@ export class Doc {
     const state = { width, height, layers };
     this.entries = [{ id: uid(), label, state, time: Date.now(), activeId: activeId || layers.at(-1)?.id, patches: null }];
     this.index = 0;
+    this._clean(state);
     this.activeId = this.entries[0].activeId;
     this.preview = null;
     this.live = null;    // trait de pinceau en cours
@@ -71,6 +72,7 @@ export class Doc {
   commit(label, state, { activeId, mergeKey, patches } = {}) {
     this.preview = null;
     this.live = null;
+    this._clean(state);
     const now = Date.now();
     const candidates = [];
     const deadPatches = [];
@@ -110,11 +112,15 @@ export class Doc {
     return true;
   }
 
+  /** Toutes les toiles d'un état repartent avec un « crayon » propre (voir cleanCtx). */
+  _clean(state) { for (const c of this._canvasesOf(state)) cleanCtx(c); }
+
   _applyPatches(patches, which) {
     if (!patches) return;
     const list = which === 'before' ? [...patches].reverse() : patches;
     for (const p of list) {
       const src = p[which];
+      cleanCtx(p.canvas);
       const ctx = p.canvas.getContext('2d');
       ctx.clearRect(p.x, p.y, src.width, src.height);
       ctx.drawImage(src, p.x, p.y);

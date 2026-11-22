@@ -93,6 +93,7 @@ function transformCanvas(src, kind) {
     case 'fv': ctx.translate(0, h); ctx.scale(1, -1); break;
   }
   ctx.drawImage(src, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); // la toile sert ensuite de calque : on ne laisse pas la rotation en place
   return c;
 }
 

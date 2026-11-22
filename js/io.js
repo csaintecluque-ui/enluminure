@@ -75,6 +75,7 @@ export async function openFileAsDoc(file) {
   const bg = mkLayer({ name: 'Arrière-plan', canvas });
   const doc = new Doc({ name: baseName(file.name), width: canvas.width, height: canvas.height, layers: [bg], label: 'Ouverture' });
   doc.fileName = file.name;
+  doc.markSaved(); // une photo qu'on vient d'ouvrir n'a pas encore de modification à perdre
   const notes = [];
   if (scaled) notes.push(`Image réduite de ${origW}×${origH} à ${canvas.width}×${canvas.height} px : c'est la taille maximale que ${isIOS ? 'Safari accepte sur iPhone / iPad' : 'le navigateur accepte'}.`);
   return { doc, notes };

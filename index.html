@@ -92,5 +92,28 @@
 <input type="color" id="color-input" class="vh" tabindex="-1" aria-hidden="true">
 
 <script type="module" src="js/main.js"></script>
+<script>
+// Filet de sécurité : si l'appli n'a pas démarré (mise à jour à moitié téléchargée, connexion coupée…), on le dit et on propose de recharger proprement.
+(function () {
+  function fail() {
+    if (window.enluminure || document.getElementById('boot-fail')) return;
+    var d = document.createElement('div');
+    d.id = 'boot-fail';
+    d.style.cssText = 'position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:#1b1512;color:#ead9b8;font:16px system-ui,sans-serif;text-align:center;padding:24px';
+    d.innerHTML = '<div><p style="font-size:20px;margin:0 0 10px">Enluminure n\u2019a pas pu d\u00e9marrer.</p><p style="color:#a8988a;margin:0 0 18px">Une mise \u00e0 jour est peut-\u00eatre en cours, ou la connexion a \u00e9t\u00e9 coup\u00e9e.</p><button id="boot-reload" style="font:inherit;padding:10px 18px;border-radius:8px;border:0;background:#c9804f;color:#1b1512;cursor:pointer">Recharger l\u2019appli</button></div>';
+    document.body.appendChild(d);
+    document.getElementById('boot-reload').onclick = function () {
+      var done = function () { location.reload(); };
+      try {
+        Promise.all([
+          navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(function (r) { return Promise.all(r.map(function (x) { return x.unregister(); })); }) : null,
+          window.caches ? caches.keys().then(function (k) { return Promise.all(k.filter(function (n) { return n.indexOf('enluminure-') === 0; }).map(function (n) { return caches.delete(n); })); }) : null
+        ]).then(done, done);
+      } catch (e) { done(); }
+    };
+  }
+  window.addEventListener('load', function () { setTimeout(fail, 6000); });
+})();
+</script>
 </body>
 </html>

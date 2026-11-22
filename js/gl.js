@@ -165,8 +165,15 @@ let bigOut = null;
  * Renvoie une toile de la taille de `rect`, valable jusqu'au prochain appel (à recopier pour la garder).
  */
 export function glRun(src, rect, passes, pad = 0) {
-  if (!S || S.gl.isContextLost()) init();
   const r = rect || { x: 0, y: 0, w: src.width, h: src.height };
+  if (!S || S.gl.isContextLost()) {
+    try { init(); }
+    catch (err) {
+      // Pas de carte graphique utilisable : les réglages simples (tables de tons) se calculent quand même, sur le processeur
+      if (passes.every(p => p.lut && !/uniform/.test(p.frag))) return cpuLut(src, r, passes);
+      throw new Error("Ce réglage a besoin de l'accélération graphique (WebGL), désactivée ou absente dans ce navigateur. Essayez avec Chrome ou Edge à jour.");
+    }
+  }
   const full = { w: r.w, h: r.h };
   if (!upCanvas) upCanvas = newCanvas(1, 1);
   const tileMax = Math.min(TILE, S.maxTex - 2 * pad);
@@ -193,6 +200,21 @@ export function glRun(src, rect, passes, pad = 0) {
     }
   }
   return bigOut;
+}
+
+let cpuOut = null;
+function cpuLut(src, r, passes) {
+  if (!cpuOut || cpuOut.width !== r.w || cpuOut.height !== r.h) { if (cpuOut) cpuOut.width = 0; cpuOut = newCanvas(r.w, r.h); }
+  const ctx = ctxOf(cpuOut);
+  ctx.clearRect(0, 0, r.w, r.h);
+  ctx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  const img = ctx.getImageData(0, 0, r.w, r.h), d = img.data;
+  for (const p of passes) {
+    const t = p.lut;
+    for (let i = 0; i < d.length; i += 4) { d[i] = t[d[i] * 4]; d[i + 1] = t[d[i + 1] * 4 + 1]; d[i + 2] = t[d[i + 2] * 4 + 2]; }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cpuOut;
 }
 
 /** Copie durable d'un résultat. */

@@ -426,7 +426,18 @@ export function initToolbar(app) {
   swap.addEventListener('click', () => app.swapColors());
   reset.addEventListener('click', () => app.resetColors());
   bar.append(el('div', { class: 'tool-sep' }), el('div', { class: 'swatches' }, bg, fg, swap, reset));
-  bar.append(el('div', { class: 'tool-spacer' }));
+  // Écran bas (portable, tablette) : les outils passent sur 2 ou 3 colonnes pour rester tous visibles, avec les couleurs
+  const nTools = TOOLS.filter(t => t !== '-').length, nSeps = TOOLS.filter(t => t === '-').length + 1;
+  const layout = () => {
+    if (matchMedia('(max-width: 760px)').matches) { bar.style.removeProperty('--tool-cols'); bar.classList.remove('multi'); return; }
+    const h = root.clientHeight - 16;
+    let cols = 1;
+    if (nTools * 38 + nSeps * 11 + 52 > h) { cols = 2; while (cols < 4 && Math.ceil(nTools / cols) * 38 + 52 > h) cols++; }
+    bar.style.setProperty('--tool-cols', cols);
+    bar.classList.toggle('multi', cols > 1);
+  };
+  new ResizeObserver(layout).observe(root);
+  layout();
   // Sur téléphone : boutons Calques / Historique dans la barre du haut
   for (const b of document.querySelectorAll('#topbar .panel-toggle')) {
     b.innerHTML = icon(b.dataset.panel, 20);
@@ -444,6 +455,24 @@ export function renderToolbar(app) {
 // ——— Barre d'options (selon l'outil) ———
 export function renderOptions(app) {
   const bar = $('#optionsbar');
+  // La barre tient sur une seule ligne (elle défile si l'écran est étroit) : on garde la position, sauf en changeant d'outil
+  const keep = bar.dataset.tool === String(app.tool) ? bar.scrollLeft : 0;
+  bar.dataset.tool = String(app.tool);
+  if (!bar.dataset.wheel) {
+    bar.dataset.wheel = '1';
+    bar.addEventListener('wheel', (e) => {
+      if (bar.scrollWidth <= bar.clientWidth || e.target === document.activeElement || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      bar.scrollLeft += e.deltaY; e.preventDefault();
+    }, { passive: false });
+    // bords estompés quand il reste des options à faire défiler
+    const edges = () => {
+      bar.classList.toggle('can-left', bar.scrollLeft > 2);
+      bar.classList.toggle('can-right', bar.scrollLeft < bar.scrollWidth - bar.clientWidth - 2);
+    };
+    bar._edges = edges;
+    bar.addEventListener('scroll', edges, { passive: true });
+    new ResizeObserver(edges).observe(bar);
+  }
   bar.textContent = '';
   const t = TOOLS.find(x => x.id === app.tool) || { icon: 'fit', label: 'Transformation manuelle' };
   bar.append(el('span', { class: 'opt-tool', html: icon(t.icon, 16) }, el('b', {}, t.label)));
@@ -471,6 +500,8 @@ export function renderOptions(app) {
     bar.append(seg, btn('100 %', 'zoom100'), btn("Taille de l'écran", 'fit'));
     bar.append(el('span', { class: 'opt-hint' }, 'Glisser horizontalement pour un zoom progressif · Alt : inverser'));
   }
+  bar.scrollLeft = keep;
+  bar._edges();
 }
 
 // ——— Barre d'état ———

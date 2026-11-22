@@ -541,5 +541,6 @@ export function renderShape(s) {
     if (s.fill) { ctx.fillStyle = s.fillColor; ctx.fill(); }
     if (s.stroke && sw) { ctx.strokeStyle = s.strokeColor; ctx.lineWidth = sw; ctx.stroke(); }
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   return { canvas: c, x: Math.floor(minX) - pad, y: Math.floor(minY) - pad };
 }

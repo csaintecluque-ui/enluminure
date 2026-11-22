@@ -79,6 +79,24 @@ Les modèles d'IA tournent **dans le navigateur, sur l'appareil** : sur la carte
 
 Moteur : ONNX Runtime Web (MIT), fourni dans `vendor/ort/`, et transformers.js 4.3.2 (Apache 2.0), chargé une fois depuis jsDelivr puis gardé pour le hors-connexion.
 
+## Version 0.6.1 — grande vérification
+
+Toutes les fonctions ont été repassées une par une (menus, outils, raccourcis, souris, doigt, fichiers), avec des corrections :
+
+- Après une rotation ou une symétrie, le pinceau, la gomme et les autres outils dessinaient au mauvais endroit : corrigé
+- Petits écrans d'ordinateur : tous les outils, les deux couleurs et la corbeille des calques restent visibles (les outils se rangent sur plusieurs colonnes) ; la barre d'options reste sur une seule ligne (elle défile si l'écran est étroit), donc l'image ne saute plus quand on change d'outil
+- L'image reste bien cadrée quand la fenêtre change de taille ou quand on tourne l'appareil
+- Les raccourcis clavier continuent de fonctionner après avoir touché un curseur, une case ou une liste
+- Téléphone : boutons Valider / Annuler toujours visibles, menu rangé par rubriques qui se déplient, les fenêtres de réglage laissent voir l'image, tous les outils et les couleurs tiennent sur deux rangées
+- Tactile : le premier appui juste après un trait n'est plus ignoré
+- Copier / coller fonctionne même quand le navigateur refuse l'accès au presse-papiers ; « Copier » confirme tout de suite, même sur une grande image
+- Une lettre tapée par erreur dans une case de chiffres ne remet plus la valeur à 1
+- Une photo tout juste ouverte n'est plus marquée « modifiée »
+- Sans accélération graphique, les réglages de couleur fonctionnent quand même
+- Si l'appli ne démarre pas, un bouton « Recharger l'appli » apparaît ; un message s'affiche quand un problème survient
+
+Non vérifié sur de vrais appareils : Safari (iPhone, iPad, Mac) et Firefox.
+
 ## Feuille de route
 
 1. Le socle ✔

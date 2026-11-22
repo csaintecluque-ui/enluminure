@@ -84,12 +84,19 @@ const vec3 = (h) => hexToRgb(h).map(x => x / 255);
 function slider(label, value, min, max, step, onChange, unit = '') {
   const r = el('input', { type: 'range', min, max, step, value });
   const n = el('input', { type: 'number', min, max, step, value, class: 'adj-num', inputmode: 'decimal' });
-  const set = (v, src) => { v = clamp(+v, min, max); if (Number.isNaN(v)) return; if (src !== 'n') n.value = v; if (src !== 'r') r.value = v; onChange(v); };
+  let cur = value;
+  const set = (v, src) => {
+    if (v === '' || v == null || Number.isNaN(+v)) { n.value = cur; return; } // saisie vide ou invalide : on garde l'ancienne valeur
+    v = clamp(+v, min, max); cur = v;
+    if (src !== 'n' || +n.value !== v) n.value = v;
+    if (src !== 'r') r.value = v;
+    onChange(v);
+  };
   r.addEventListener('input', () => set(r.value, 'r'));
   n.addEventListener('change', () => set(String(n.value).replace(',', '.'), 'n'));
   n.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); n.blur(); } });
   const w = el('div', { class: 'adj-row' }, el('span', { class: 'adj-label' }, label), r, n, unit ? el('span', { class: 'adj-unit' }, unit) : null);
-  w.set = (v) => { n.value = v; r.value = v; };
+  w.set = (v) => { cur = v; n.value = v; r.value = v; };
   return w;
 }
 const check = (label, value, onChange) => { const i = el('input', { type: 'checkbox', checked: value }); i.addEventListener('change', () => onChange(i.checked)); return el('label', { class: 'opt adj-check' }, i, label); };
@@ -175,9 +182,10 @@ function curvesEditor(p, set, ctx) {
   };
   const toVal = (e) => { const r = cv.getBoundingClientRect(); return [clamp(Math.round((e.clientX - r.left) / r.width * 255), 0, 255), clamp(Math.round((1 - (e.clientY - r.top) / r.height) * 255), 0, 255), (e.clientY - r.top) / r.height]; };
   let drag = -1;
+  cv.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
   cv.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    cv.setPointerCapture(e.pointerId);
+    try { cv.setPointerCapture(e.pointerId); } catch {}
     const pts = p.channels[ch];
     const r = cv.getBoundingClientRect();
     const [x, y] = toVal(e);

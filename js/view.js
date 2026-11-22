@@ -27,9 +27,13 @@ export class Viewport {
     canvas.addEventListener('pointermove', e => this.onMove(e));
     canvas.addEventListener('pointerup', e => this.onUp(e, false));
     canvas.addEventListener('pointercancel', e => this.onUp(e, true));
+    canvas.addEventListener('lostpointercapture', e => { if (this.pointers.has(e.pointerId) && (this.action || this.pinch)) this.onUp(e, false); else this.pointers.delete(e.pointerId); });
+    window.addEventListener('blur', () => { if (this.pointers.size || this.action) { this.pointers.clear(); this.pinch = null; this.suppress = false; this._cancelAction(); } });
     canvas.addEventListener('pointerleave', () => { app.setCursorInfo(null); this.hover = null; this.requestRender(); });
     canvas.addEventListener('wheel', e => this.onWheel(e), { passive: false });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
+    // Sans cela, Chrome sur téléphone « avale » le premier toucher qui suit un trait rapide (il croit arrêter un défilement)
+    canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
     for (const t of ['gesturestart', 'gesturechange', 'gestureend']) canvas.addEventListener(t, e => e.preventDefault());
     this.resize();
   }
@@ -45,10 +49,34 @@ export class Viewport {
     return this.ctx.createPattern(c, 'repeat');
   }
 
+  /** Zoom et position qu'aurait « Taille de l'écran » pour une zone de travail donnée. */
+  _fitFor(d, W, H, initial = false) {
+    const pad = W < 600 ? 12 : 36;
+    let z = Math.min((W - pad * 2) / d.width, (H - pad * 2) / d.height);
+    if (initial) z = Math.min(z, 1);
+    z = clamp(z, MIN_ZOOM, MAX_ZOOM);
+    return { zoom: z, panX: Math.round((W - d.width * z) / 2), panY: Math.round((H - d.height * z) / 2) };
+  }
+  /** Adapte la vue d'un document à la taille actuelle de la zone de travail. */
+  adapt(d = this.doc) {
+    if (!d || !d.view.ready) return;
+    const v = d.view, oldW = v.vw, oldH = v.vh;
+    if (oldW && (oldW !== this.cssW || oldH !== this.cssH)) {
+      // L'image était ajustée à l'écran ? Elle le reste (fenêtre redimensionnée, téléphone tourné,
+      // barre d'options sur deux lignes…) ; sinon on garde le même centre.
+      const was = (ini) => { const f = this._fitFor(d, oldW, oldH, ini); return Math.abs(f.zoom - v.zoom) < 1e-6 && Math.abs(f.panX - v.panX) <= 1 && Math.abs(f.panY - v.panY) <= 1; };
+      if (was(false)) Object.assign(v, this._fitFor(d, this.cssW, this.cssH, false));
+      else if (was(true)) Object.assign(v, this._fitFor(d, this.cssW, this.cssH, true));
+      else { v.panX += (this.cssW - oldW) / 2; v.panY += (this.cssH - oldH) / 2; }
+    }
+    v.vw = this.cssW; v.vh = this.cssH;
+  }
   resize() {
     const p = this.canvas.parentElement;
     this.cssW = Math.max(1, p.clientWidth);
     this.cssH = Math.max(1, p.clientHeight);
+    this.adapt();
+    this.app.updateZoomInfo?.();
     this.dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.round(this.cssW * this.dpr);
     this.canvas.height = Math.round(this.cssH * this.dpr);
@@ -60,14 +88,8 @@ export class Viewport {
   // ——— Zoom ———
   fit(initial = false) {
     const d = this.doc; if (!d) return;
-    const pad = this.cssW < 600 ? 12 : 36;
-    let z = Math.min((this.cssW - pad * 2) / d.width, (this.cssH - pad * 2) / d.height);
-    if (initial) z = Math.min(z, 1);
-    z = clamp(z, MIN_ZOOM, MAX_ZOOM);
-    d.view.zoom = z;
-    d.view.panX = Math.round((this.cssW - d.width * z) / 2);
-    d.view.panY = Math.round((this.cssH - d.height * z) / 2);
-    d.view.ready = true;
+    Object.assign(d.view, this._fitFor(d, this.cssW, this.cssH, initial));
+    d.view.ready = true; d.view.vw = this.cssW; d.view.vh = this.cssH;
     this.changed();
   }
   actualPixels() { this.zoomTo(1); }
@@ -186,6 +208,9 @@ export class Viewport {
     this.app.closeMenus?.();
     try { this.canvas.setPointerCapture(e.pointerId); } catch {}
     const p = this._pt(e);
+    // Premier doigt (ou souris) d'un nouveau geste : aucun autre contact ne peut être en cours.
+    // Sans cela, un « lâcher » manqué par le navigateur ferait prendre tous les gestes suivants pour un pincement.
+    if (e.isPrimary !== false && this.pointers.size && !this.pointers.has(e.pointerId)) { this.pointers.clear(); this.pinch = null; this.suppress = false; if (this.action) this._cancelAction(); }
     this.pointers.set(e.pointerId, p);
     if (this.pointers.size === 2) { this._cancelAction(); this._startPinch(); return; }
     if (this.pointers.size > 2 || this.suppress) return;
@@ -280,6 +305,11 @@ export class Viewport {
     this.action = null;
     const d = this.doc;
     if (a && d) {
+      // la position du lâcher compte aussi (si le navigateur a regroupé ou sauté les derniers déplacements)
+      const pe = this._pt(e), lp = this.lastPt;
+      if (!cancelled && lp && e.clientX !== undefined && (Math.abs(pe.x - lp.x) > 0.5 || Math.abs(pe.y - lp.y) > 0.5) && (a.type === 'tool' || a.type === 'move' || a.type === 'pan')) {
+        this.action = a; this.onMove(e); this.action = null;
+      }
       if (a.type === 'tool') {
         a.impl.up(this.toDoc(this._pt(e)), e, cancelled);
         this.requestRender();

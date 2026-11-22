@@ -1,5 +1,5 @@
 // Enluminure — application
-import { VERSION, el, mkLayer, newCanvas, ctxOf, fitsLimits, LIMITS, isIOS, isMac, baseName, canvasToBlob } from './util.js';
+import { VERSION, el, mkLayer, newCanvas, ctxOf, fitsLimits, LIMITS, isIOS, isMac, baseName, canvasToBlob, cloneCanvas, freeCanvas } from './util.js';
 import { Doc } from './document.js';
 import * as ops from './ops.js';
 import { flattenState, maskedCanvas, styledOf } from './render.js';
@@ -96,6 +96,7 @@ class App {
     this.doc = doc;
     doc?.invalidate();
     if (doc && !doc.view.ready) this.view.fit(true);
+    else if (doc) this.view.adapt(doc);
     this.refresh();
   }
   async closeDoc(doc) {
@@ -217,10 +218,13 @@ class App {
       layer180: flipOp('Rotation du calque 180°', '180'),
       layerFH: flipOp('Symétrie horizontale du calque', 'fh'),
       layerFV: flipOp('Symétrie verticale du calque', 'fv'),
-      centerLayer: layerOp('Centrer le calque', (st, id) => {
-        const l = st.layers.find(x => x.id === id);
-        return ops.updateLayer(st, id, { x: Math.round((st.width - l.canvas.width) / 2), y: Math.round((st.height - l.canvas.height) / 2) });
-      }),
+      centerLayer: { enabled: () => !!D()?.active?.canvas, run: () => {
+        const d = D(), st = d.committed, l = d.active;
+        const b = SEL.alphaBounds(l.canvas) || { x: 0, y: 0, w: l.canvas.width, h: l.canvas.height }; // on centre ce qui est visible
+        const dx = Math.round((st.width - b.w) / 2) - (l.x + b.x), dy = Math.round((st.height - b.h) / 2) - (l.y + b.y);
+        if (!dx && !dy) { toast('Ce calque est déjà centré.'); return; }
+        this.commit('Centrer le calque', l.smart ? SM.updateSmart(tree.moveItems(st, [l.id], dx, dy), l.id) : tree.moveItems(st, [l.id], dx, dy));
+      } },
 
       fillFg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.fg, 'Remplir (premier plan)') },
       fillBg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.bg, 'Remplir (arrière-plan)') },
@@ -391,7 +395,7 @@ class App {
         this.view.fit(true);
       } },
       clearSel: { enabled: () => hasLayer() && !!D().committed.selection, run: () => this.fillLayer(null, 'Effacer') },
-      cut: { enabled: () => hasLayer() && !!D().committed.selection && !tree.isGroup(D().active), run: async () => { await this.copy(false); this.fillLayer(null, 'Couper'); } },
+      cut: { enabled: () => hasLayer() && !!D().committed.selection && !tree.isGroup(D().active), run: async () => { if (await this.copy(false)) this.fillLayer(null, 'Couper'); } },
       freeTransform: { enabled: hasLayer, run: () => this.startTransform() },
 
       // ——— Réglages et filtres ———
@@ -630,7 +634,24 @@ class App {
       'ctrl+i': 'invertQuick', 'ctrl+shift+u': 'desaturate', 'ctrl+shift+l': 'autoLevels', 'ctrl+alt+shift+l': 'autoContrast', 'ctrl+shift+b': 'autoColor',
       'ctrl+f': 'lastFilter',
     };
-    const typing = (t) => t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+    // On « écrit » seulement dans une zone de texte ou de nombre : un curseur, une case à cocher ou une liste
+    // qui garde le focus ne doit pas bloquer les raccourcis (Ctrl+Z, B, Espace…).
+    const typing = (t) => t && (t.isContentEditable || t.tagName === 'TEXTAREA'
+      || (t.tagName === 'INPUT' && !/^(range|checkbox|radio|color|button|file)$/.test(t.type)));
+    // Après un clic sur un bouton, un curseur ou une liste, le clavier revient à l'image
+    // (sinon Espace ou Entrée ré-actionnent le dernier bouton cliqué au lieu de l'outil).
+    const release = (e) => {
+      const t = e.target;
+      if (!t || !t.closest || t.closest('.modal, .lq-overlay')) return;
+      if (e.type === 'click' ? (e.detail > 0 && t.closest('button')) : /^(range|checkbox|radio|color)$/.test(t.type) || t.tagName === 'SELECT') {
+        const a = document.activeElement;
+        if (a && a !== document.body && !typing(a)) a.blur();
+      }
+    };
+    document.addEventListener('click', release);
+    document.addEventListener('change', release);
+    // Windows : relâcher Alt (Alt+clic pour la pipette, la source du tampon…) ne doit pas activer le menu du navigateur
+    for (const ev of ['keydown', 'keyup']) document.addEventListener(ev, (e) => { if (e.key === 'Alt' && this.doc && !typing(e.target)) e.preventDefault(); });
     document.addEventListener('keydown', (e) => {
       if (e.key === ' ' && !typing(e.target) && !modalOpen()) {
         if (!this.view.spaceHeld) { this.view.spaceHeld = true; this.view.updateCursor(); }
@@ -710,7 +731,7 @@ class App {
     document.addEventListener('paste', async (e) => {
       if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
       const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
-      if (!item) return;
+      if (!item) { if (this.clip && this.doc && !modalOpen()) { e.preventDefault(); this.pasteClip(); } return; }
       e.preventDefault();
       const f = item.getAsFile();
       if (f) await this.pasteImage(f);
@@ -763,6 +784,15 @@ class App {
 
   async pasteImage(blob) {
     const file = blob instanceof File ? blob : new File([blob], 'Presse-papiers.png', { type: blob.type });
+    if (this.doc && this.clipFresh()) { this.pasteClip(); return; }
+    if (this.doc && this.clip) { // est-ce notre propre copie ? alors on la recolle au même endroit
+      try {
+        const bmp = await createImageBitmap(file);
+        const mine = bmp.width === this.clip.canvas.width && bmp.height === this.clip.canvas.height;
+        bmp.close();
+        if (mine) { this.pasteClip(); return; }
+      } catch {}
+    }
     if (!this.doc) {
       const { doc } = await openFileAsDoc(new File([file], 'Presse-papiers.png', { type: file.type }));
       doc.name = 'Presse-papiers';
@@ -776,16 +806,17 @@ class App {
   }
 
   async pasteFromMenu() {
-    if (!navigator.clipboard?.read) { toast(`Utilisez ${MOD}+V pour coller une image.`); return; }
     try {
+      if (!navigator.clipboard?.read) throw new Error('indisponible');
+      if (this.doc && this.clipFresh()) { this.pasteClip(); return; }
       const items = await navigator.clipboard.read();
       for (const it of items) {
         const type = it.types.find(t => t.startsWith('image/'));
         if (type) { await this.pasteImage(await it.getType(type)); return; }
       }
-      toast('Le presse-papiers ne contient pas d\'image.');
+      if (!this.pasteClip()) toast('Le presse-papiers ne contient pas d\'image.');
     } catch {
-      toast(`Accès au presse-papiers refusé : utilisez ${MOD}+V.`);
+      if (!this.pasteClip()) toast(`Rien à coller pour l'instant : copiez d'abord un calque ou une sélection (ou utilisez ${MOD}+V pour une image venue d'ailleurs).`, 5000);
     }
   }
 
@@ -803,13 +834,36 @@ class App {
       if (!cut) { toast('Rien de sélectionné à copier.'); return; }
       c = cut.canvas;
     }
-    if (!navigator.clipboard?.write || !window.ClipboardItem) { toast('Copie d\'image non disponible dans ce navigateur.'); return; }
+    // Copie gardée dans l'appli (coller marche toujours, au même endroit), et dans le presse-papiers du système si possible
+    freeCanvas(this.clip?.canvas);
+    const pos = sel ? SEL.selBounds(sel) : (merged || tree.isGroup(d.active) ? { x: 0, y: 0 } : { x: d.active.x, y: d.active.y });
+    const clip = this.clip = { canvas: cloneCanvas(c), x: pos.x, y: pos.y, w: d.width, h: d.height, t: Date.now(), sync: 'pending' };
+    const what = merged ? 'Image fusionnée copiée.' : sel ? 'Sélection copiée.' : 'Calque copié.';
+    // Le message s'affiche tout de suite : le presse-papiers du système peut être lent (grande image) ou refusé
+    toast(what);
+    const only = () => { clip.sync = 'failed'; if (this.clip === clip) toast(`${what} (Collez-la dans Enluminure avec ${MOD}+V ou Édition › Coller.)`, 4000); };
     try {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasToBlob(c, 'image/png') })]);
-      toast(merged ? 'Image fusionnée copiée.' : 'Calque copié.');
-    } catch {
-      toast('Copie refusée par le navigateur.');
-    }
+      if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error('indisponible');
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': canvasToBlob(clip.canvas, 'image/png') })]).then(() => { clip.sync = 'ok'; }, only);
+    } catch { only(); }
+    return true;
+  }
+
+  /** Vrai si notre copie est plus récente que ce que contient le presse-papiers du système (envoi en cours, ou refusé il y a peu). */
+  clipFresh() {
+    const k = this.clip;
+    return !!k && (k.sync === 'pending' || (k.sync === 'failed' && Date.now() - k.t < 60000));
+  }
+
+  /** Colle la copie gardée dans l'appli, au même endroit si le document a la même taille. */
+  pasteClip() {
+    const k = this.clip;
+    if (!k || !this.doc) return false;
+    const d = this.doc, same = d.width === k.w && d.height === k.h;
+    const canvas = cloneCanvas(k.canvas);
+    const l = mkLayer({ name: ops.nextLayerName(d.committed), canvas, x: same ? k.x : Math.round((d.width - canvas.width) / 2), y: same ? k.y : Math.round((d.height - canvas.height) / 2) });
+    this.commit('Coller', ops.insertLayer(d.committed, l, d.activeId), { activeId: l.id });
+    return true;
   }
 
   /** Remplit (ou efface, color = null) le calque ou son masque, limité à la sélection. */
@@ -1327,7 +1381,8 @@ class App {
         const opts = { format: format.value, quality: +q.value / 100, scale: +scale.value / 100 };
         try { localStorage.setItem('enluminure.export', JSON.stringify({ format: format.value, quality: +q.value, scale: +scale.value })); } catch {}
         const blob = await this.withBusy('Export…', () => exportBlob(d, opts));
-        const ext = format.value;
+        let ext = format.value;
+        if (ext === 'webp' && blob.type && blob.type !== 'image/webp') { ext = 'png'; toast('Ce navigateur ne sait pas écrire le WebP : image exportée en PNG.', 5000); }
         const ok = await saveBlob(blob, `${(fname.value.trim() || d.name)}.${ext}`, 'Image');
         if (ok) toast(`Image exportée (${Math.round(blob.size / 1024).toLocaleString('fr-FR')} Ko).`);
       },
@@ -1387,12 +1442,23 @@ class App {
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
       el('p', { class: 'muted' }, 'Étape 6 — IA locale : sujet, suppression de l\'arrière-plan, sélection d\'objet, gomme magique, remplissage d\'après le contenu et agrandissement, calculés sur votre appareil.'),
+      el('p', { class: 'muted' }, 'Version 0.6.1 : grande vérification de toutes les fonctions et corrections.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT). IA : transformers.js (Apache 2.0) et ONNX Runtime (MIT) ; modèles RMBG 1.4 (BRIA AI, usage non commercial), SAM 2.1 (Meta), MI-GAN (Picsart), Real-ESRGAN (Xintao Wang).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }
 }
 
 const app = new App();
+// Une erreur imprévue ne doit jamais passer inaperçue : on l'affiche (cela aide aussi à la signaler).
+let lastErr = 0;
+const report = (msg) => {
+  if (!msg || /ResizeObserver loop/.test(msg)) return;
+  const now = Date.now(); if (now - lastErr < 4000) return; lastErr = now;
+  document.querySelector('#busy').hidden = true;
+  toast(`Un problème est survenu : ${String(msg).slice(0, 140)}`, 7000);
+};
+window.addEventListener('error', (e) => report(e.message));
+window.addEventListener('unhandledrejection', (e) => report(e.reason?.message || e.reason));
 window.enluminure = app; // pratique pour le débogage
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {

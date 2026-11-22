@@ -44,10 +44,12 @@ function optRange(label, value, { min, max, step = 1, unit = '', log = false, pc
   const uiv = toUi(value);
   const range = el('input', { type: 'range', min: log ? 0 : min, max: log ? 1000 : max, step: log ? 1 : step, value: toRange(uiv) });
   const num = el('input', { type: 'number', min, max, step, value: uiv, inputmode: 'numeric', class: 'opt-num' });
+  let cur = uiv;
   const set = (v, from) => {
+    if (v === '' || v == null || Number.isNaN(+v)) { num.value = cur; return; } // saisie vide ou invalide : on garde l'ancienne valeur
     v = clamp(+v, min, max);
-    if (Number.isNaN(v)) return;
-    if (from !== 'num') num.value = v;
+    cur = v;
+    if (from !== 'num' || +num.value !== v) num.value = v;
     if (from !== 'range') range.value = toRange(v);
     onChange(fromUi(v));
   };
@@ -55,7 +57,7 @@ function optRange(label, value, { min, max, step = 1, unit = '', log = false, pc
   num.addEventListener('change', () => set(num.value, 'num'));
   num.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') num.blur(); });
   const wrap = el('label', { class: 'opt opt-range' }, el('span', {}, label), range, num, unit ? el('span', { class: 'opt-unit' }, unit) : null);
-  wrap.update = (v) => { const u = toUi(v); num.value = u; range.value = toRange(u); };
+  wrap.update = (v) => { const u = toUi(v); cur = u; num.value = u; range.value = toRange(u); };
   return wrap;
 }
 function optCheck(label, value, onChange) {
@@ -871,8 +873,7 @@ class CropTool extends Tool {
     bar.append(
       optSelect('Proportions', s.ratio, RATIOS, v => { s.ratio = v; this.save(); this.reset(); }),
       optCheck('Supprimer les pixels recadrés', s.deletePixels, v => { s.deletePixels = v; this.save(); }),
-      optButton('✓ Valider', () => this.apply(), 'primary'),
-      optButton('Annuler', () => { this.reset(); }),
+      el('span', { class: 'opt-actions' }, optButton('✓ Valider', () => this.apply(), 'primary'), optButton('Annuler', () => { this.reset(); })),
       el('span', { class: 'opt-hint' }, 'Entrée : valider · Échap : annuler · Maj : garder les proportions'));
   }
 }
@@ -982,8 +983,12 @@ class MoveTool extends Tool {
     if (!r) return;
     const A = view.toScreen({ x: r.x, y: r.y }), B = view.toScreen({ x: r.x2, y: r.y2 });
     ctx.save();
-    ctx.lineWidth = 1; ctx.setLineDash([6, 4]); ctx.strokeStyle = '#C9804F';
-    ctx.strokeRect(Math.round(A.x) + 0.5, Math.round(A.y) + 0.5, Math.round(B.x - A.x), Math.round(B.y - A.y));
+    // trait plein et coins marqués : on ne le confond pas avec les pointillés d'une sélection
+    const x = Math.round(A.x) + 0.5, y = Math.round(A.y) + 0.5, w = Math.round(B.x - A.x), h = Math.round(B.y - A.y);
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(201,128,79,.9)';
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#C9804F';
+    for (const [cx, cy] of [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]) ctx.fillRect(cx - 3, cy - 3, 6, 6);
     ctx.restore();
   }
   options(bar) {
@@ -1486,8 +1491,7 @@ class TransformTool extends Tool {
       optCheck('Conserver les proportions', s.keepRatio, v => { s.keepRatio = v; this.save(); }),
       optButton('⇋ Symétrie H', () => { this.T.w = -this.T.w; this.render(); }),
       optButton('⇵ Symétrie V', () => { this.T.h = -this.T.h; this.render(); }),
-      optButton('✓ Valider', () => this.apply(), 'primary'),
-      optButton('Annuler', () => this.abort()),
+      el('span', { class: 'opt-actions' }, optButton('✓ Valider', () => this.apply(), 'primary'), optButton('Annuler', () => this.abort())),
       el('span', { class: 'opt-hint' }, 'Poignées : taille · Hors du cadre : rotation (Maj : 15°) · Alt : depuis le centre · Entrée / Échap'));
   }
 }

@@ -225,6 +225,7 @@ export async function liquifyDialog(app) {
     clearInterval(drawing.timer);
     drawing = null;
   };
+  view.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
   view.addEventListener('pointerdown', startStroke);
   view.addEventListener('pointermove', moveStroke);
   view.addEventListener('pointerup', endStroke);

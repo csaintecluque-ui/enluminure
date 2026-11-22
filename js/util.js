@@ -1,6 +1,6 @@
 // Enluminure — outils communs (toiles, limites, modes de fusion)
 
-export const VERSION = '0.6.0';
+export const VERSION = '0.6.1';
 
 export const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -9,9 +9,14 @@ export const isTouch = matchMedia('(pointer: coarse)').matches;
 
 // Limites des navigateurs pour une toile (canvas).
 // Safari sur iPhone/iPad refuse les toiles de plus de ~16,7 millions de pixels.
+// Téléphones et tablettes Android : peu de mémoire pour les images, on reste prudent aussi.
+const isPhone = isTouch && Math.min(screen.width, screen.height) < 900;
+const lowMem = (navigator.deviceMemory || 8) <= 4;
 export const LIMITS = isIOS
   ? { side: 16384, area: 16_777_216, historyBytes: 200 * 1024 * 1024 }
-  : { side: 16384, area: 268_000_000, historyBytes: 1536 * 1024 * 1024 };
+  : isPhone || (isTouch && lowMem)
+    ? { side: 8192, area: 25_000_000, historyBytes: 300 * 1024 * 1024 }
+    : { side: 16384, area: 268_000_000, historyBytes: (lowMem ? 600 : 1536) * 1024 * 1024 };
 
 let _uid = 0;
 export const uid = () => `${Date.now().toString(36)}-${(++_uid).toString(36)}`;
@@ -24,6 +29,22 @@ export function newCanvas(w, h) {
   return c;
 }
 export const ctxOf = (c) => c.getContext('2d');
+
+/**
+ * Remet le « crayon » d'une toile dans son état normal (pas de rotation, d'opacité ni de mode de
+ * dessin laissés par une opération précédente). Sans cela, peindre sur un calque qui vient
+ * d'être pivoté, par exemple, dessinerait de travers.
+ */
+export function cleanCtx(c) {
+  if (!c || !c.width) return;
+  const ctx = c.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.imageSmoothingEnabled = true;
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+}
 
 export function cloneCanvas(src) {
   const c = newCanvas(src.width, src.height);

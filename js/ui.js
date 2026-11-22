@@ -25,8 +25,13 @@ export function openDialog({ title, body, buttons, onSubmit, wide = false, class
     const overlay = el('div', { class: `modal-overlay ${floating ? 'floating' : ''}` });
     const form = el('form', { class: `modal ${wide ? 'wide' : ''} ${className}`, novalidate: true });
     let done = false;
+    // Téléphone : une fenêtre de réglage occupe le bas de l'écran ; l'image se replace au-dessus pour rester visible
+    const app = document.querySelector('#app');
+    const small = floating && matchMedia('(max-width: 760px)').matches;
+    let ro = null;
     const close = (v) => {
       if (done) return; done = true;
+      if (small) { ro?.disconnect(); app.classList.remove('sheet-open'); app.style.removeProperty('--sheet-h'); }
       overlay.remove();
       document.removeEventListener('keydown', onKey, true);
       resolve(v);
@@ -53,6 +58,11 @@ export function openDialog({ title, body, buttons, onSubmit, wide = false, class
     overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay && !floating) close(null); });
     overlay.append(form);
     $('#modal-root').append(overlay);
+    if (small) {
+      const fitSheet = () => { app.style.setProperty('--sheet-h', `${Math.round(form.getBoundingClientRect().height)}px`); };
+      app.classList.add('sheet-open'); fitSheet();
+      ro = new ResizeObserver(fitSheet); ro.observe(form);
+    }
     document.addEventListener('keydown', onKey, true);
     requestAnimationFrame(() => {
       const f = form.querySelector('textarea, input:not([type=hidden]):not([disabled]), select');
@@ -128,7 +138,19 @@ export class MenuBar {
     this.openIndex = -1;
     const drop = el('div', { class: 'menu-drop menu-all', role: 'menu' });
     for (const m of this.menus) {
-      drop.append(el('div', { class: 'menu-group' }, m.label));
+      // un menu = un titre qu'on touche pour l'ouvrir (au lieu d'une seule liste interminable)
+      const head = el('button', { type: 'button', class: 'menu-group' }, el('span', {}, m.label), el('span', { class: 'menu-caret' }, '▸'));
+      const box = el('div', { class: 'menu-sub', hidden: true });
+      head.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = box.hidden;
+        for (const b of drop.querySelectorAll('.menu-sub')) b.hidden = true;
+        for (const h of drop.querySelectorAll('.menu-group')) h.classList.remove('open');
+        box.hidden = !open; head.classList.toggle('open', open);
+        if (open) head.scrollIntoView({ block: 'nearest' });
+      });
+      drop.append(head, box);
+      { const drop = box; // les entrées vont dans le sous-menu
       for (const it of m.items) {
         if (it === '-') continue;
         if (it.heading) { drop.append(el('div', { class: 'menu-heading' }, it.heading)); continue; }
@@ -139,6 +161,7 @@ export class MenuBar {
           el('span', { class: 'mi-check' }, checked ? '✓' : ''), el('span', { class: 'mi-label' }, it.label), el('span', { class: 'mi-key' }, ''));
         row.addEventListener('click', () => { this.close(); this.app.run(it.action); });
         drop.append(row);
+      }
       }
     }
     document.body.append(drop);
