@@ -5,6 +5,8 @@ import { $ } from './ui.js';
 import { updateLayer } from './ops.js';
 import { buildTree, isGroup, isAdjust, descendants, placeRelative } from './tree.js';
 import { ADJ } from './adjust.js';
+import { anyStyles } from './styles.js';
+import { smartFilterLabel } from './smart.js';
 
 // ——— Vignettes des calques (mises en cache : les toiles ne changent jamais) ———
 const thumbCache = new WeakMap();
@@ -75,6 +77,7 @@ export function initLayersPanel(app) {
   const btns = [
     ['newLayer', 'newLayer', 'Nouveau calque (Ctrl+Maj+N)'],
     ['newGroup', 'folder', 'Nouveau groupe (Ctrl+G : grouper la sélection)'],
+    ['layerStyle', 'fx', 'Style de calque : ombre, contour, lueur, biseau…'],
     ['maskReveal', 'mask', 'Ajouter un masque de fusion (depuis la sélection s\'il y en a une)'],
     ['newAdjustLayer', 'adjust', 'Nouveau calque de réglage'],
     ['duplicateLayer', 'duplicate', 'Dupliquer (Ctrl+J)'],
@@ -151,7 +154,36 @@ export function renderLayers(app) {
     }
   };
   walk(buildTree(layers), 0, false);
-  for (const { l, depth, clipped, dim } of rows) list.append(layerRow(app, d, l, depth, clipped, dim));
+  for (const { l, depth, clipped, dim } of rows) {
+    list.append(layerRow(app, d, l, depth, clipped, dim));
+    if (l.smart?.filters?.length) list.append(...smartRows(app, l, depth));
+  }
+}
+
+/** Filtres dynamiques d'un objet dynamique, sous sa ligne (comme dans Photoshop). */
+function smartRows(app, l, depth) {
+  const pad = `padding-left:${46 + depth * 16}px`;
+  const out = [el('div', { class: 'sf-head', style: pad }, 'Filtres dynamiques')];
+  l.smart.filters.forEach((f, i) => {
+    const eye = el('button', { type: 'button', class: 'eye', title: f.on ? 'Masquer ce filtre' : 'Afficher ce filtre', html: icon(f.on ? 'eye' : 'eyeOff', 14) });
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      app.setSmartFilters(l.id, l.smart.filters.map((x, j) => (j === i ? { ...x, on: !x.on } : x)), f.on ? 'Masquer le filtre dynamique' : 'Afficher le filtre dynamique');
+    });
+    const name = el('button', { type: 'button', class: 'sf-name', title: 'Modifier les réglages de ce filtre' }, smartFilterLabel(f));
+    name.addEventListener('click', (e) => { e.stopPropagation(); app.editSmartFilter(l.id, i); });
+    const del = el('button', { type: 'button', class: 'sf-del', title: 'Supprimer ce filtre', html: icon('trash', 14) });
+    del.addEventListener('click', (e) => { e.stopPropagation(); app.setSmartFilters(l.id, l.smart.filters.filter((_, j) => j !== i), 'Supprimer le filtre dynamique'); });
+    out.push(el('div', { class: `sf-row ${f.on ? '' : 'off'}`, style: pad }, eye, name, del));
+  });
+  return out;
+}
+
+function fxBadge(app, l) {
+  if (!anyStyles(l.styles)) return null;
+  const b = el('button', { type: 'button', class: `fx-badge ${l.styles.hidden ? 'off' : ''}`, title: 'Effets du calque — clic : les modifier' }, 'fx');
+  b.addEventListener('click', (e) => { e.stopPropagation(); app.editStyle(l.id); });
+  return b;
 }
 
 function layerRow(app, d, l, depth, clipped, dim) {
@@ -196,8 +228,10 @@ function layerRow(app, d, l, depth, clipped, dim) {
   const row = el('div', {
     class: `layer-row ${l.id === d.activeId ? 'active' : selected ? 'selected' : ''} ${l.visible && !dim ? '' : 'hidden-layer'} ${clipped ? 'clipped' : ''} ${group ? 'group-row' : ''}`,
     'data-id': l.id, style: `padding-left:${2 + depth * 16}px`,
-  }, eye, twisty, clipped ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb, mthumb,
+  }, eye, twisty, clipped ? el('span', { class: 'clip-mark', html: icon('clip', 14) }) : null, thumb,
+  l.smart ? el('span', { class: 'smart-badge', title: 'Objet dynamique : transformations et filtres sans perte', html: icon('smart', 13) }) : null, mthumb,
   l.text ? el('span', { class: 'text-badge', title: 'Calque de texte (outil Texte pour le modifier)' }, 'T') : null,
+  fxBadge(app, l),
   el('div', { class: 'lmeta' }, name,
     (isAdjust(l) && ADJ[l.adjust.type]?.label !== l.name) || (l.blend !== 'normal' && l.blend !== 'pass through') || l.opacity < 1 ? el('small', {}, [isAdjust(l) && ADJ[l.adjust.type]?.label !== l.name ? ADJ[l.adjust.type]?.label : '', (l.blend !== 'normal' && l.blend !== 'pass through') ? blendLabel(l.blend) : '', l.opacity < 1 ? `${Math.round(l.opacity * 100)} %` : ''].filter(Boolean).join(' · ')) : null), grip);
 
@@ -355,9 +389,9 @@ export const TOOLS = [
   { id: 'crop', icon: 'crop', label: 'Recadrage', key: 'C' },
   { id: 'eyedropper', icon: 'eyedropper', label: 'Pipette', key: 'I' },
   '-',
-  { id: 'heal', icon: 'heal', label: 'Correcteur', key: 'J', step: 5 },
+  { id: 'heal', icon: 'heal', label: 'Correcteur', key: 'J' },
   { id: 'brush', icon: 'brush', label: 'Pinceau', key: 'B' },
-  { id: 'stamp', icon: 'stamp', label: 'Tampon de duplication', key: 'S', step: 5 },
+  { id: 'stamp', icon: 'stamp', label: 'Tampon de duplication', key: 'S' },
   { id: 'eraser', icon: 'eraser', label: 'Gomme', key: 'E' },
   { id: 'gradient', icon: 'gradient', label: 'Dégradé', key: 'G' },
   { id: 'bucket', icon: 'bucket', label: 'Pot de peinture', key: 'Maj+G' },

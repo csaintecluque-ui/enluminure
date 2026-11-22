@@ -2,7 +2,11 @@
 import { VERSION, el, mkLayer, newCanvas, ctxOf, fitsLimits, LIMITS, isIOS, isMac, baseName, canvasToBlob } from './util.js';
 import { Doc } from './document.js';
 import * as ops from './ops.js';
-import { flattenState, maskedCanvas } from './render.js';
+import { flattenState, maskedCanvas, styledOf } from './render.js';
+import { styledMerged, anyStyles } from './styles.js';
+import { styleDialog } from './fxdialog.js';
+import { liquifyDialog } from './liquify.js';
+import * as SM from './smart.js';
 import { Viewport } from './view.js';
 import { $, toast, openDialog, confirmDialog, field, MenuBar, modalOpen } from './ui.js';
 import { initLayersPanel, renderLayers, renderHistory, renderTabs, initToolbar, renderToolbar, renderOptions, renderStatus, startRename, TOOLS } from './panels.js';
@@ -183,8 +187,14 @@ class App {
     const hasLayer = () => !!this.doc?.active;
     const D = () => this.doc;
     const layerOp = (label, fn) => ({ enabled: hasLayer, run: () => { const d = D(); this.commit(label, fn(d.committed, d.activeId)); } });
+    const flipOp = (label, kind) => layerOp(label, (st, id) => {
+      const L = st.layers.find(l => l.id === id);
+      const st2 = ops.transformLayer(st, id, kind);
+      return L?.smart ? SM.updateSmart(st2, id, { T: SM.smartFlip(L, kind) }) : st2;
+    });
     const imgOp = (label, kind) => ({ enabled: hasDoc, run: () => {
-      const st = ops.transformImage(D().committed, kind);
+      const st0 = D().committed;
+      const st = SM.resmartAll(st0, ops.transformImage(st0, kind), kind);
       this.commit(label, st);
       if (kind === 'cw' || kind === 'ccw') this.view.fit(true);
     } });
@@ -201,11 +211,11 @@ class App {
       copy: { enabled: hasLayer, run: () => this.copy(false) },
       copyMerged: { enabled: hasDoc, run: () => this.copy(true) },
       paste: { run: () => this.pasteFromMenu() },
-      layerCW: layerOp('Rotation du calque 90° horaire', (st, id) => ops.transformLayer(st, id, 'cw')),
-      layerCCW: layerOp('Rotation du calque 90° antihoraire', (st, id) => ops.transformLayer(st, id, 'ccw')),
-      layer180: layerOp('Rotation du calque 180°', (st, id) => ops.transformLayer(st, id, '180')),
-      layerFH: layerOp('Symétrie horizontale du calque', (st, id) => ops.transformLayer(st, id, 'fh')),
-      layerFV: layerOp('Symétrie verticale du calque', (st, id) => ops.transformLayer(st, id, 'fv')),
+      layerCW: flipOp('Rotation du calque 90° horaire', 'cw'),
+      layerCCW: flipOp('Rotation du calque 90° antihoraire', 'ccw'),
+      layer180: flipOp('Rotation du calque 180°', '180'),
+      layerFH: flipOp('Symétrie horizontale du calque', 'fh'),
+      layerFV: flipOp('Symétrie verticale du calque', 'fv'),
       centerLayer: layerOp('Centrer le calque', (st, id) => {
         const l = st.layers.find(x => x.id === id);
         return ops.updateLayer(st, id, { x: Math.round((st.width - l.canvas.width) / 2), y: Math.round((st.height - l.canvas.height) / 2) });
@@ -215,6 +225,49 @@ class App {
       fillBg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.bg, 'Remplir (arrière-plan)') },
       clearLayer: { enabled: hasLayer, run: () => this.fillLayer(null, 'Effacer le calque') },
       editText: { enabled: () => !!D()?.active?.text, run: () => this.tools.text.edit(D().active) },
+      // ——— Objets dynamiques ———
+      toSmart: { enabled: () => this.stylable() && !D().active.smart, run: () => {
+        const d = D(), st = SM.toSmart(d.committed, d.activeId);
+        if (!st) { toast('Ce calque est vide.'); return; }
+        d.target = 'layer';
+        this.commit('Convertir en objet dynamique', st);
+        toast('Objet dynamique : transformations et filtres restent modifiables, sans perte.', 4000);
+      } },
+      rasterizeSmart: { enabled: () => !!D()?.active?.smart, run: () => {
+        const d = D();
+        this.commit("Pixelliser l'objet dynamique", ops.updateLayer(d.committed, d.activeId, { smart: null }));
+      } },
+      resetSmart: { enabled: () => !!D()?.active?.smart, run: () => {
+        const d = D(), L = d.active, T = SM.smartT(L);
+        this.commit('Annuler la transformation', SM.updateSmart(d.committed, L.id, { T: { cx: T.cx, cy: T.cy, w: L.smart.source.width, h: L.smart.source.height, a: 0 } }));
+      } },
+      // ——— Styles de calque ———
+      layerStyle: { enabled: () => this.stylable(), run: () => styleDialog(this, D().activeId) },
+      styleCopy: { enabled: () => anyStyles(D()?.active?.styles), run: () => { this.styleClip = structuredClone(D().active.styles); toast('Style copié.'); } },
+      stylePaste: { enabled: () => !!this.styleClip && this.stylable(), run: () => {
+        const d = D();
+        const ids = (d.selIds.size > 1 ? [...d.selIds] : [d.activeId]).filter(id => this.stylable(d.committed.layers.find(l => l.id === id)));
+        let st = d.committed;
+        for (const id of ids) st = ops.updateLayer(st, id, { styles: structuredClone(this.styleClip) });
+        this.commit('Coller le style de calque', st);
+      } },
+      styleClear: { enabled: () => anyStyles(D()?.active?.styles), run: () => { const d = D(); this.commit('Effacer le style de calque', ops.updateLayer(d.committed, d.activeId, { styles: null })); } },
+      styleToggle: { enabled: () => anyStyles(D()?.active?.styles), checked: () => !!D()?.active?.styles?.hidden, run: () => {
+        const d = D(), l = d.active;
+        this.commit(l.styles.hidden ? 'Afficher les effets' : 'Masquer les effets', ops.updateLayer(d.committed, l.id, { styles: { ...l.styles, hidden: !l.styles.hidden } }));
+      } },
+      styleRasterize: { enabled: () => anyStyles(D()?.active?.styles) && !!D().active.canvas, run: () => {
+        const d = D(), l = d.active;
+        const r = styledOf(l);
+        let patch = { styles: null };
+        if (r && !r.empty) {
+          const c = newCanvas(r.w, r.h);
+          ctxOf(c).drawImage(styledMerged(r), 0, 0);
+          patch = { canvas: c, x: l.x + r.x, y: l.y + r.y, styles: null, mask: null, text: null };
+          d.target = 'layer';
+        }
+        this.commit('Pixelliser le style de calque', ops.updateLayer(d.committed, l.id, patch));
+      } },
       cropTool: { enabled: hasDoc, run: () => this.setTool('crop') },
       imageSize: { enabled: hasDoc, run: () => this.dialogImageSize() },
       canvasSize: { enabled: hasDoc, run: () => this.dialogCanvasSize() },
@@ -340,6 +393,7 @@ class App {
       autoColor: { enabled: () => this.pixelReady(), run: () => this.autoAdjust('color') },
       desaturate: { enabled: () => this.pixelReady(), run: () => this.quickAdjust('Désaturation', { type: 'huesat', ...ADJ.huesat.defaults(), saturation: -100 }) },
       invertQuick: { enabled: () => this.pixelReady(true), run: () => (D().target === 'mask' ? this.invertMask() : this.quickAdjust('Négatif', { type: 'invert' })) },
+      liquify: { enabled: () => this.pixelReady() && !D().active.smart, run: () => liquifyDialog(this) },
       lastFilter: { enabled: () => !!this.lastFilter && this.pixelReady(true), run: () => this.applyFilter(this.lastFilter.id, this.lastFilter.params, false) },
       ...Object.fromEntries(Object.keys(ADJ).map(k => [`adj_${k}`, { enabled: () => this.pixelReady(), run: () => this.adjustDialog(k) }])),
       ...Object.fromEntries(Object.keys(ADJ).map(k => [`adjLayer_${k}`, { enabled: hasDoc, run: () => this.adjustLayerDialog(k) }])),
@@ -430,6 +484,19 @@ class App {
         { label: 'Modifier le texte…', action: 'editText' },
         { label: 'Afficher / masquer', action: 'toggleVisible', key: K('Ctrl+,') },
         '-',
+        { heading: 'Objet dynamique' },
+        { label: 'Convertir en objet dynamique', action: 'toSmart' },
+        { label: 'Annuler la transformation', action: 'resetSmart' },
+        { label: "Pixelliser l'objet dynamique", action: 'rasterizeSmart' },
+        '-',
+        { heading: 'Style de calque' },
+        { label: 'Effets (ombre, contour, lueur…)…', action: 'layerStyle' },
+        { label: 'Copier le style', action: 'styleCopy' },
+        { label: 'Coller le style', action: 'stylePaste' },
+        { label: 'Masquer les effets', action: 'styleToggle' },
+        { label: 'Pixelliser le style', action: 'styleRasterize' },
+        { label: 'Effacer le style', action: 'styleClear' },
+        '-',
         { label: "Masque d'écrêtage", action: 'clipLayer', key: K('Ctrl+Alt+G') },
         { label: 'Grouper les calques', action: 'groupLayers', key: K('Ctrl+G') },
         { label: 'Dissocier les calques', action: 'ungroupLayers', key: K('Ctrl+Maj+G') },
@@ -471,6 +538,8 @@ class App {
       ] },
       { label: 'Filtre', items: [
         { label: 'Dernier filtre', action: 'lastFilter', key: K('Ctrl+F') },
+        '-',
+        { label: 'Fluidité…', action: 'liquify', key: K('Ctrl+Maj+X') },
         ...FILTER_ORDER.flatMap((k, i) => {
           const f = FILTERS[k], prev = FILTERS[FILTER_ORDER[i - 1]];
           const row = { label: `${f.label}…`, action: `filter_${k}` };
@@ -531,7 +600,7 @@ class App {
       'ctrl+alt+shift+w': 'export', 'ctrl+alt+shift+s': 'export', 'ctrl+w': 'close',
       'ctrl+z': 'undo', 'ctrl+shift+z': 'redo', 'ctrl+y': 'redo', 'ctrl+alt+z': 'undo',
       'ctrl+c': 'copy', 'ctrl+shift+c': 'copyMerged',
-      'ctrl+shift+n': 'newLayer', 'ctrl+j': 'duplicateLayer', 'ctrl+e': 'mergeDown', 'ctrl+shift+e': 'mergeVisible',
+      'ctrl+shift+x': 'liquify', 'ctrl+shift+n': 'newLayer', 'ctrl+j': 'duplicateLayer', 'ctrl+e': 'mergeDown', 'ctrl+shift+e': 'mergeVisible',
       'ctrl+alt+g': 'clipLayer', 'ctrl+alt+i': 'imageSize', 'ctrl+alt+c': 'canvasSize', 'ctrl+,': 'toggleVisible',
       'ctrl+]': 'layerUp', 'ctrl+[': 'layerDown', 'ctrl+shift+]': 'layerTop', 'ctrl+shift+[': 'layerBottom',
       'ctrl+0': 'fit', 'ctrl+1': 'zoom100', 'ctrl++': 'zoomIn', 'ctrl+-': 'zoomOut',
@@ -576,7 +645,7 @@ class App {
       if (ctrl || e.altKey) return;
       // Outils
       if (k === 'g' && e.shiftKey) { this.setTool(this.tool === 'bucket' ? 'gradient' : 'bucket'); return; }
-      const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop', m: 'marquee', l: 'lasso', w: 'wand' }[k];
+      const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop', m: 'marquee', l: 'lasso', w: 'wand', s: 'stamp', j: 'heal' }[k];
       if (tool && !e.shiftKey) { this.setTool(tool); return; }
       if (k === 'x') { this.swapColors(); return; }
       if (k === 'd') { this.resetColors(); return; }
@@ -727,6 +796,7 @@ class App {
   fillLayer(color, label) {
     const d = this.doc, L = d.active;
     if (!L.visible) { toast('Ce calque est masqué.'); return; }
+    if (this.smartBlocked(L)) return;
     const P = prepareTarget(d, L.id);
     if (!P) { toast('Choisissez un calque, pas un groupe.'); return; }
     const sel = d.committed.selection;
@@ -842,9 +912,20 @@ class App {
    * Fenêtre avec aperçu en direct, puis modification des pixels du calque (ou du masque),
    * limitée à la sélection. `run(source, zone, réglages)` renvoie la zone modifiée.
    */
-  async pixelDialog({ title, label, params, ui, run, histo = false, skipDialog = false }) {
+  /** Message (et refus) quand on veut peindre directement sur un objet dynamique. */
+  smartBlocked(L = this.doc?.active) {
+    if (!L?.smart || this.doc.target === 'mask') return false;
+    toast("C'est un objet dynamique : pixellisez-le d'abord (Calque › Pixelliser l'objet dynamique), ou peignez sur un nouveau calque.", 5000);
+    return true;
+  }
+
+  async pixelDialog({ title, label, params, ui, run, histo = false, skipDialog = false, smart = null }) {
     const d = this.doc, L = d.active;
     if (!effectiveVisibleL(d, L)) { toast('Ce calque est masqué.'); return; }
+    if (L?.smart && d.target !== 'mask') {
+      if (!smart) { this.smartBlocked(L); return; }
+      return this.smartFilterDialog({ title, ui, histo, skipDialog, entry: { ...smart, params, on: true } });
+    }
     const P = prepareTarget(d, L.id);
     if (!P) { toast('Choisissez un calque de pixels.'); return; }
     const si = selIn(P);
@@ -918,14 +999,54 @@ class App {
     pv.width = 0;
   }
 
+  /** Ajoute (index = null) ou modifie un filtre dynamique, avec aperçu en direct. */
+  async smartFilterDialog({ title, ui, histo = false, skipDialog = false, entry, index = null }) {
+    const d = this.doc, L = d.active, st0 = d.committed;
+    const base = L.smart.filters || [];
+    const label = SM.smartFilterLabel(entry);
+    const stateWith = () => {
+      const list = base.slice();
+      const e = { ...entry, params: structuredClone(entry.params) };
+      if (index == null) list.push(e); else list[index] = e;
+      return SM.updateSmart(st0, L.id, { filters: list });
+    };
+    let ok = true;
+    if (!skipDialog && ui) {
+      let raf = 0;
+      const update = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; d.setPreview(stateWith()); this.view.requestRender(); }); };
+      const ctx = { histo: histo ? histogram(L.canvas) : null };
+      update();
+      ok = await openDialog({ title: `${title} (filtre dynamique)`, body: el('div', { class: 'form' }, ui(entry.params, update, ctx)), floating: true, className: 'adj-dialog', buttons: [{ label: 'Annuler', value: false }, { label: 'OK', primary: true, value: true }] });
+      cancelAnimationFrame(raf);
+    }
+    if (!ok) { d.cancelPreview(); this.refresh({ history: false }); return; }
+    const st = await this.withBusy('Application…', () => stateWith());
+    this.commit(index == null ? `Filtre dynamique : ${label}` : `Modifier : ${label}`, st);
+  }
+
+  editSmartFilter(layerId, i) {
+    this.selectLayer(layerId);
+    const L = this.doc.active, f = L?.smart?.filters?.[i];
+    if (!f) return;
+    const entry = structuredClone(f);
+    if (f.kind === 'filter') return this.smartFilterDialog({ title: FILTERS[f.id].label, ui: FILTERS[f.id].ui, entry, index: i });
+    if (f.kind === 'adjust') { const def = ADJ[f.params.type]; return this.smartFilterDialog({ title: def.label, ui: def.ui, histo: def.histo, entry, index: i }); }
+    toast("Ce réglage automatique n'a pas d'options : vous pouvez le masquer ou le supprimer.");
+  }
+
+  setSmartFilters(layerId, filters, label) {
+    const d = this.doc;
+    this.commit(label, SM.updateSmart(d.committed, layerId, { filters }));
+  }
+
   adjustDialog(type) {
     const def = ADJ[type];
     const params = { type, ...def.defaults(this) };
-    return this.pixelDialog({ title: def.label, label: def.label, params, ui: def.ui, histo: def.histo, run: (src, r, p) => applyAdjust(src, p, r) });
+    return this.pixelDialog({ title: def.label, label: def.label, params, ui: def.ui, histo: def.histo, run: (src, r, p) => applyAdjust(src, p, r), smart: { kind: 'adjust' } });
   }
 
   quickAdjust(label, adj) {
-    return this.pixelDialog({ title: label, label, params: adj, skipDialog: true, run: (src, r, p) => applyAdjust(src, p, r) });
+    return this.pixelDialog({ title: label, label, params: adj, skipDialog: true, run: (src, r, p) => applyAdjust(src, p, r), smart: { kind: 'adjust' } });
   }
 
   autoAdjust(kind) {
@@ -934,7 +1055,7 @@ class App {
     const H = histogram(L.canvas);
     const lut = autoLUT(H, kind);
     const label = { levels: 'Niveaux automatiques', contrast: 'Contraste automatique', color: 'Couleur automatique' }[kind];
-    return this.pixelDialog({ title: label, label, params: {}, skipDialog: true, run: (src, r) => glRun(src, r, [{ frag: LUT_SHADER, lut }]) });
+    return this.pixelDialog({ title: label, label, params: { lut }, skipDialog: true, run: (src, r) => glRun(src, r, [{ frag: LUT_SHADER, lut }]), smart: { kind: 'lut', label } });
   }
 
   /** Négatif d'un masque : ce qui était masqué devient visible et inversement. */
@@ -957,7 +1078,7 @@ class App {
     const f = FILTERS[id];
     const p = params ? structuredClone(params) : (this.filterParams?.[id] ? structuredClone(this.filterParams[id]) : f.defaults());
     if (id === 'noise') p.seed = Math.random() * 100;
-    await this.pixelDialog({ title: f.label, label: f.label, params: p, ui: f.ui, run: (src, r, pp) => f.run(src, r, pp), skipDialog: !withDialog });
+    await this.pixelDialog({ title: f.label, label: f.label, params: p, ui: f.ui, run: (src, r, pp) => f.run(src, r, pp), skipDialog: !withDialog, smart: { kind: 'filter', id } });
     this.lastFilter = { id, params: p };
     this.filterParams = { ...(this.filterParams || {}), [id]: p };
   }
@@ -1008,6 +1129,11 @@ class App {
     if (!existing) { d.target = layer.mask ? 'mask' : 'layer'; this.selectLayer(layer.id); }
   }
 
+  /** Calque qui peut recevoir des effets (pixels ou texte, pas un groupe ni un réglage). */
+  stylable(l = this.doc?.active) { return !!l && !tree.isGroup(l) && !tree.isAdjust(l) && !!l.canvas; }
+
+  editStyle(id, focus) { this.selectLayer(id); if (this.stylable()) styleDialog(this, id, focus); }
+
   editAdjust(id) {
     const l = this.doc?.committed.layers.find(x => x.id === id);
     if (tree.isAdjust(l)) this.adjustLayerDialog(l.adjust.type, id);
@@ -1017,7 +1143,10 @@ class App {
     const d = this.doc;
     const blob = await this.withBusy('Préparation du fichier .psd…', () => docToPsdBlob(d));
     const ok = await saveBlob(blob, `${d.name}.psd`, 'Document Photoshop');
-    if (ok) { d.markSaved(); this.refresh({ history: false }); toast('Document enregistré.'); }
+    if (ok) {
+      d.markSaved(); this.refresh({ history: false });
+      toast(d.committed.layers.some(l => l.smart) ? 'Document enregistré. Les objets dynamiques y sont enregistrés comme calques normaux.' : 'Document enregistré.', 4500);
+    }
   }
 
   // ——— Fenêtres ———
@@ -1108,7 +1237,8 @@ class App {
         const [W, H] = toPx();
         if (!fitsLimits(W, H)) { toast('Taille impossible pour ce navigateur.', 4000); return false; }
         if (W === W0 && H === H0) return;
-        const st = await this.withBusy('Redimensionnement…', () => ops.resizeImage(d.committed, W, H, method.value));
+        const st0 = d.committed;
+        const st = await this.withBusy('Redimensionnement…', () => SM.resmartAll(st0, ops.resizeImage(st0, W, H, method.value), 'scale', W / st0.width, H / st0.height));
         this.commit("Taille de l'image", st);
         this.view.fit(true);
       },
@@ -1200,6 +1330,8 @@ class App {
       ['Pinceau / Gomme / Pipette', 'B · E · I'],
       ['Dégradé / Pot de peinture', 'G · Maj+G'],
       ['Texte / Formes / Recadrage', 'T · U · C'],
+      ['Correcteur / Tampon de duplication', 'J · S (Alt+clic : choisir la source)'],
+      ['Fluidité', K('Ctrl+Maj+X')],
       ['Taille du pinceau / dureté', '[ ] · Maj+[ ]'],
       ['Opacité du pinceau', '1 … 9, 0 = 100 %'],
       ['Trait droit', 'Maj+clic'],
@@ -1232,7 +1364,7 @@ class App {
       el('img', { src: 'icons/sceau-enluminure.svg', alt: '', width: 120, height: 120 }),
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
-      el('p', { class: 'muted' }, 'Étape 4 — réglages (niveaux, courbes, teinte/saturation…), calques de réglage et filtres, calculés par la carte graphique.'),
+      el('p', { class: 'muted' }, 'Étape 5 — outils « pro » : correcteur, tampon de duplication, fluidité, styles de calque (ombre, contour, biseau…) et objets dynamiques.'),
       el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }

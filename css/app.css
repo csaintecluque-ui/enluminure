@@ -406,3 +406,54 @@ kbd { font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--parc
   .modal { width: 100%; border-radius: 16px 16px 0 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); max-height: 92dvh; }
   .row { flex-wrap: wrap; }
 }
+
+/* ——— Étape 5 : styles de calque ——— */
+.fx-badge { flex: none; height: 18px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); background: var(--raise); color: var(--copper-2); font: italic 700 11px/1 Georgia, serif; cursor: pointer; margin-left: -2px; }
+.fx-badge.off { opacity: .45; text-decoration: line-through; }
+.fx-dialog { width: min(560px, 100%) !important; }
+.fx-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; align-items: start; }
+.fx-list { display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); padding-right: 8px; }
+.fx-item { display: flex; align-items: center; gap: 6px; border-radius: 6px; padding: 1px 4px; }
+.fx-item.current { background: var(--raise); }
+.fx-item input { accent-color: var(--copper); margin: 0; }
+.fx-name { flex: 1; text-align: left; background: none; border: 0; color: var(--parch); font: inherit; font-size: 13px; padding: 6px 2px; cursor: pointer; }
+.fx-item.current .fx-name { color: var(--copper-2); font-weight: 600; }
+.fx-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.fx-title { font-weight: 600; color: var(--parch); margin-bottom: 2px; }
+.fx-sub { color: var(--copper-2); font-size: 12px; margin-top: 6px; text-transform: uppercase; letter-spacing: .06em; }
+.fx-note { color: var(--muted); font-size: 12px; margin: 4px 0 0; line-height: 1.45; }
+@media (max-width: 760px) {
+  .fx-body { grid-template-columns: minmax(0, 1fr); }
+  .fx-list { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 6px; }
+  .fx-item { flex: none; }
+  .fx-name { white-space: nowrap; }
+}
+
+/* ——— Fluidité (plein écran) ——— */
+.lq-overlay { position: fixed; inset: 0; z-index: 60; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: #120e0c; color: var(--parch); }
+.lq-top, .lq-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.lq-foot { border-bottom: 0; border-top: 1px solid var(--line); padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.lq-title { font-family: Georgia, serif; font-size: 17px; color: var(--copper-2); margin-right: 4px; }
+.lq-tools { display: flex; gap: 4px; flex-wrap: wrap; }
+.lq-stage { position: relative; display: grid; place-items: center; overflow: hidden; padding: 12px; background: repeating-conic-gradient(#2a2320 0 25%, #221c19 0 50%) 0 0 / 20px 20px; }
+.lq-canvas { touch-action: none; cursor: none; image-rendering: auto; box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+.lq-ring { position: absolute; pointer-events: none; border-radius: 50%; border: 1px solid rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.55); }
+.lq-hint { color: var(--muted); font-size: 12px; }
+.lq-spacer { flex: 1; }
+@media (max-width: 760px) {
+  .lq-top { gap: 6px 10px; }
+  .lq-top .opt-range input[type=range] { width: 90px; }
+  .lq-hint { display: none; }
+  .lq-stage { padding: 4px; }
+}
+
+/* ——— Objets dynamiques ——— */
+.smart-badge { flex: none; display: grid; place-items: center; width: 18px; height: 18px; margin-left: -14px; margin-top: 18px; border-radius: 4px; background: var(--copper); color: #1b1512; z-index: 1; }
+.sf-head { font-size: 11px; color: var(--muted); padding: 2px 8px 0; text-transform: uppercase; letter-spacing: .05em; }
+.sf-row { display: flex; align-items: center; gap: 6px; min-height: 28px; padding-right: 8px; }
+.sf-row .eye { width: 26px; height: 26px; }
+.sf-row.off .sf-name { opacity: .45; text-decoration: line-through; }
+.sf-name { flex: 1; text-align: left; background: none; border: 0; color: var(--parch); font: inherit; font-size: 12.5px; padding: 4px 2px; cursor: pointer; }
+.sf-name:hover { color: var(--copper-2); }
+.sf-del { background: none; border: 0; color: var(--muted); padding: 4px; cursor: pointer; display: grid; place-items: center; }
+.sf-del:hover { color: var(--danger); }

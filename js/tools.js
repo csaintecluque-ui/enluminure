@@ -1,15 +1,16 @@
 // Enluminure — outils de l'étape 2 : pinceau, gomme, pipette, pot de peinture, dégradé, texte, formes, recadrage
-import { el, clamp, mkLayer, newCanvas, ctxOf, freeCanvas } from './util.js';
+import { el, clamp, mkLayer, newCanvas, ctxOf, freeCanvas, cloneCanvas, isTouch } from './util.js';
 import { updateLayer, insertLayer, nextLayerName, cropState, pickLayerAt } from './ops.js';
 import { layerRect } from './render.js';
 import {
   prepareTarget, ensurePaintable, commitPixels, Stroke, sampleColor, floodRegion, maskToCanvas, drawGradient,
-  renderText, ensureFont, renderShape, FONTS, rgba, lumOf, selIn,
+  renderText, ensureFont, renderShape, FONTS, rgba, lumOf, selIn, healPixels, findHealOffset,
 } from './paint.js';
 import { applyBuf } from './document.js';
 import { isGroup, isAdjust, moveItems, effectiveVisible } from './tree.js';
 import { selRect, selPolygon, selFromRegion, combineSel, moveSel, selContains, cutOut, clipSelToDoc, featherSel, alphaBounds } from './selection.js';
 import { openDialog, field, toast } from './ui.js';
+import { smartT, updateSmart } from './smart.js';
 
 export const DEFAULT_SETTINGS = {
   move: { autoSelect: false },
@@ -19,6 +20,8 @@ export const DEFAULT_SETTINGS = {
   transform: { keepRatio: true },
   brush: { size: 30, hardness: 0.8, opacity: 1, flow: 1, pSize: true, pOpacity: false },
   eraser: { size: 50, hardness: 0.8, opacity: 1, flow: 1, pSize: true, pOpacity: false },
+  stamp: { size: 60, hardness: 0.5, opacity: 1, flow: 1, pSize: true, pOpacity: false, aligned: true, all: false },
+  heal: { size: 40, hardness: 0.6, mode: 'spot', aligned: true, all: false, pSize: true },
   eyedropper: { all: true, size: 1 },
   bucket: { tolerance: 32, contiguous: true, all: false, opacity: 1 },
   gradient: { type: 'linear', toTransparent: false, reverse: false, opacity: 1 },
@@ -86,6 +89,7 @@ class Tool {
     const L = d?.committed.layers.find(l => l.id === d.activeId);
     if (!L) { toast('Choisissez d\'abord un calque.'); return null; }
     if (!effectiveVisible(d.committed.layers, L)) { toast('Ce calque est masqué : affichez-le pour le modifier.'); return null; }
+    if (L.smart && d.target !== 'mask') { this.app.smartBlocked(L); return null; }
     if ((isGroup(L) || isAdjust(L)) && !(d.target === 'mask' && L.mask)) { toast(isAdjust(L) ? 'Un calque de réglage n\'a pas de pixels : peignez sur son masque ou choisissez un autre calque.' : 'Choisissez un calque, pas un groupe.'); return null; }
     return L;
   }
@@ -174,6 +178,191 @@ class BrushTool extends Tool {
       return true;
     }
     return false;
+  }
+}
+
+// ——— Tampon de duplication et correcteur : outils qui prélèvent une « source » ———
+class SourceTool extends BrushTool {
+  constructor(app, id) { super(app, id, false); this.source = null; this.offset = null; this.pickNext = false; }
+  usesSource() { return true; }
+  setSource(p) {
+    this.source = { x: Math.round(p.x), y: Math.round(p.y), doc: this.doc.id };
+    this.offset = null;
+    this.pickNext = false;
+    toast('Source choisie : peignez maintenant sur la zone à corriger.', 1800);
+    this.app.refreshOptions();
+    this.app.view.requestRender();
+  }
+  /** Décalage (document) vers la source pour un trait qui commence en p, ou null. */
+  startOffset(p) {
+    const src = this.source;
+    if (!src || src.doc !== this.doc.id) {
+      toast(isTouch ? 'Touchez « Choisir la source », puis la zone à recopier.' : 'Alt + clic sur la zone à recopier pour choisir la source.', 3500);
+      return null;
+    }
+    if (!this.s.aligned || !this.offset) this.offset = { dx: Math.round(src.x - p.x), dy: Math.round(src.y - p.y) };
+    return this.offset;
+  }
+  /** Calque dont on modifie les pixels (pas le masque). */
+  pixelLayer() {
+    const L = this.paintLayer(); if (!L) return null;
+    if (this.doc.target === 'mask') { toast('Cet outil travaille sur les pixels : cliquez sur la vignette du calque (pas sur son masque).', 3500); return null; }
+    return L.canvas ? L : null;
+  }
+  /** Où l'on prélève : le calque lui-même, ou une copie de toute l'image (calques visibles). */
+  sampleSource(P) {
+    if (this.s.all) return { src: cloneCanvas(this.doc.composite()), sx: P.ox, sy: P.oy, snap: true };
+    return { src: P.canvas, sx: 0, sy: 0, snap: false };
+  }
+  overlay(ctx, view) {
+    super.overlay(ctx, view);
+    const src = this.source;
+    if (!this.usesSource() || !src || src.doc !== this.doc?.id) return;
+    const pt = view.action ? view.lastPt : view.hover;
+    let q;
+    if (pt && this.offset && (view.action || this.s.aligned)) {
+      const d = view.toDoc(pt);
+      q = view.toScreen({ x: d.x + this.offset.dx, y: d.y + this.offset.dy });
+    } else q = view.toScreen(src);
+    const r = Math.max(4, this.s.size * view.doc.view.zoom / 2);
+    ctx.save();
+    for (const [w, c] of [[3, 'rgba(0,0,0,.55)'], [1, 'rgba(255,255,255,.95)']]) {
+      ctx.lineWidth = w; ctx.strokeStyle = c;
+      ctx.beginPath();
+      ctx.moveTo(q.x - 9, q.y); ctx.lineTo(q.x + 9, q.y); ctx.moveTo(q.x, q.y - 9); ctx.lineTo(q.x, q.y + 9);
+      ctx.stroke();
+      if (view.action || (pt && this.offset && this.s.aligned)) { ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, Math.PI * 2); ctx.stroke(); }
+    }
+    ctx.restore();
+  }
+  sourceOptions(bar) {
+    const s = this.s;
+    const has = this.source && this.source.doc === this.doc?.id;
+    bar.append(
+      optCheck('Aligné', s.aligned, v => { s.aligned = v; this.offset = null; this.save(); }),
+      optSelect('Prélever', s.all ? 'all' : 'layer', [['layer', 'Calque actif'], ['all', 'Tous les calques']], v => { s.all = v === 'all'; this.save(); }),
+      optButton(this.pickNext ? 'Touchez la source…' : 'Choisir la source', () => {
+        this.pickNext = !this.pickNext; this.app.refreshOptions();
+        if (this.pickNext) toast('Touchez la zone à recopier.', 2000);
+      }, this.pickNext ? 'primary' : ''),
+      el('span', { class: 'opt-hint' }, has ? 'Alt + clic : nouvelle source' : 'Alt + clic : choisir la source'));
+  }
+}
+
+class StampTool extends SourceTool {
+  down(p, e) {
+    if (e.altKey || this.pickNext) { this.setSource(p); return false; }
+    const L = this.pixelLayer(); if (!L) return false;
+    const off = this.startOffset(p); if (!off) return false;
+    const wasText = !!L.text;
+    const P = prepareTarget(this.doc, L.id); if (!P) return false;
+    const smp = this.sampleSource(P);
+    this.snap = smp.snap ? smp.src : null;
+    this.stroke = new Stroke(this.app, P, { ...this.s, color: '#000000', erase: false, clone: { src: smp.src, sx: smp.sx + off.dx, sy: smp.sy + off.dy } });
+    this.stroke.point(p.x, p.y, pressureOf(e));
+    this.stroke.flush();
+    if (wasText) toast('Le calque de texte devient une image.');
+    return true;
+  }
+  up() {
+    if (!this.stroke) return;
+    this.stroke.end('Tampon de duplication');
+    this.stroke = null;
+    freeCanvas(this.snap); this.snap = null;
+  }
+  cancel() { super.cancel(); freeCanvas(this.snap); this.snap = null; }
+  options(bar) {
+    const s = this.s;
+    this.sizeCtl = optRange('Taille', s.size, { min: 1, max: 1000, log: true, unit: 'px' }, v => { s.size = v; this.save(); this.app.view.requestRender(); });
+    bar.append(this.sizeCtl,
+      optRange('Dureté', s.hardness, { min: 0, max: 100, pct: true, unit: '%' }, v => { s.hardness = v; this.save(); }),
+      optRange('Opacité', s.opacity, { min: 1, max: 100, pct: true, unit: '%' }, v => { s.opacity = v; this.save(); }),
+      optRange('Flux', s.flow, { min: 1, max: 100, pct: true, unit: '%' }, v => { s.flow = v; this.save(); }));
+    this.sourceOptions(bar);
+  }
+}
+
+class HealTool extends SourceTool {
+  usesSource() { return this.s.mode === 'source'; }
+  down(p, e) {
+    const s = this.s;
+    if (s.mode === 'source' && (e.altKey || this.pickNext)) { this.setSource(p); return false; }
+    if (e.altKey) { toast('Passez en mode « Avec source » pour choisir vous-même la zone à recopier.'); return false; }
+    const L = this.pixelLayer(); if (!L) return false;
+    let off = null;
+    if (s.mode === 'source') { off = this.startOffset(p); if (!off) return false; }
+    const P = prepareTarget(this.doc, L.id); if (!P) return false;
+    this.off = off ? { ...off } : null;
+    this.smp = this.sampleSource(P);
+    // Pendant le geste : un voile sombre montre la zone à corriger ; le calcul se fait au lâcher.
+    this.stroke = new Stroke(this.app, P, { size: s.size, hardness: s.hardness, flow: 1, opacity: 0.45, pSize: s.pSize, pOpacity: false, color: '#2a2320', erase: false });
+    this.stroke.point(p.x, p.y, pressureOf(e));
+    this.stroke.flush();
+    return true;
+  }
+  up() {
+    const st = this.stroke, smp = this.smp;
+    if (!st) return;
+    this.stroke = null; this.smp = null;
+    try { this.heal(st, smp, this.off); }
+    catch (err) { console.error(err); toast('La correction a échoué.'); this.doc.cancelPreview(); this.app.refresh({ history: false }); }
+    finally { freeCanvas(st.buf); freeCanvas(st.dabC); if (smp.snap) freeCanvas(smp.src); }
+  }
+  cancel() { super.cancel(); if (this.smp?.snap) freeCanvas(this.smp.src); this.smp = null; }
+  key(e, k) { return (k === '[' || k === ']') ? super.key(e, k) : false; }
+  heal(st, smp, off) {
+    const doc = this.doc, P = st.P, c = P.canvas, s = this.s;
+    const abort = () => { doc.cancelPreview(); this.app.refresh({ history: false }); };
+    if (doc.live !== st.live || !st.bounds) return abort();
+    const pad = Math.max(3, Math.round(s.size * 0.25)), b = st.bounds;
+    const x0 = clamp(b.x - pad, 0, c.width), y0 = clamp(b.y - pad, 0, c.height);
+    const x1 = clamp(b.x + b.w + pad, 0, c.width), y1 = clamp(b.y + b.h + pad, 0, c.height);
+    const B = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, W = B.w, H = B.h;
+    if (W < 2 || H < 2) return abort();
+    // Masque de la retouche : le geste, limité à la sélection
+    const tmp = newCanvas(W, H), tc = ctxOf(tmp);
+    tc.drawImage(st.buf, B.x, B.y, W, H, 0, 0, W, H);
+    const sel = st.live.sel;
+    if (sel) { tc.globalCompositeOperation = 'destination-in'; tc.drawImage(sel.canvas, sel.ox - B.x, sel.oy - B.y); }
+    const md = tc.getImageData(0, 0, W, H).data;
+    freeCanvas(tmp);
+    const M = new Float32Array(W * H);
+    let any = false;
+    for (let i = 0; i < M.length; i++) { const a = md[i * 4 + 3] / 255; M[i] = a; if (a > 0.001) any = true; }
+    if (!any) return abort();
+    const sctx = ctxOf(smp.src);
+    const Bs = { x: B.x + smp.sx, y: B.y + smp.sy, w: W, h: H };
+    if (!off) { // correcteur localisé : on cherche tout seul la meilleure source autour
+      const big = Math.max(W, H);
+      const R = Math.ceil(Math.max(3.2 * s.size, big <= s.size * 4 ? 1.3 * big : 0)) + 2;
+      const ex = Math.max(0, Bs.x - R), ey = Math.max(0, Bs.y - R);
+      const ex2 = Math.min(smp.src.width, Bs.x + W + R), ey2 = Math.min(smp.src.height, Bs.y + H + R);
+      const f = findHealOffset(sctx.getImageData(ex, ey, ex2 - ex, ey2 - ey), ex, ey, Bs, M, s.size);
+      if (!f) { toast('Pas de zone voisine utilisable : essayez le mode « Avec source ».', 3500); return abort(); }
+      off = { dx: f.ox, dy: f.oy };
+    }
+    const T = smp.snap ? sctx.getImageData(Bs.x, Bs.y, W, H) : ctxOf(c).getImageData(B.x, B.y, W, H);
+    const S = sctx.getImageData(Bs.x + off.dx, Bs.y + off.dy, W, H);
+    const out = healPixels(T, S, M, smp.snap);
+    commitPixels(this.app, s.mode === 'source' ? 'Correcteur' : 'Correcteur localisé', P.layer.id, { x: B.x + P.ox, y: B.y + P.oy, w: W, h: H }, (ctx, P2, r) => {
+      if (smp.snap) { // prélèvement sur toute l'image : on pose la retouche par-dessus le calque
+        const t = newCanvas(W, H);
+        ctxOf(t).putImageData(out, 0, 0);
+        ctx.drawImage(t, r.x, r.y);
+        freeCanvas(t);
+      } else ctx.putImageData(out, r.x, r.y);
+    }, P);
+  }
+  options(bar) {
+    const s = this.s;
+    bar.append(optSelect('', s.mode, [['spot', 'Localisé (automatique)'], ['source', 'Avec source']], v => { s.mode = v; this.save(); this.app.refreshOptions(); this.app.view.requestRender(); }));
+    this.sizeCtl = optRange('Taille', s.size, { min: 1, max: 1000, log: true, unit: 'px' }, v => { s.size = v; this.save(); this.app.view.requestRender(); });
+    bar.append(this.sizeCtl,
+      optRange('Dureté', s.hardness, { min: 0, max: 100, pct: true, unit: '%' }, v => { s.hardness = v; this.save(); }));
+    if (s.mode === 'source') this.sourceOptions(bar);
+    else bar.append(
+      optSelect('Prélever', s.all ? 'all' : 'layer', [['layer', 'Calque actif'], ['all', 'Tous les calques']], v => { s.all = v === 'all'; this.save(); }),
+      el('span', { class: 'opt-hint' }, 'Peignez sur le défaut : la correction se fait au lâcher'));
   }
 }
 
@@ -651,7 +840,7 @@ class MoveTool extends Tool {
     const L = st.layers.find(l => l.id === d.activeId);
     if (!L) { toast('Aucun calque sélectionné'); return false; }
     if (!effectiveVisible(st.layers, L)) { toast('Ce calque est masqué : affichez-le pour le déplacer.'); return false; }
-    if (st.selection && !isGroup(L) && d.target === 'layer') return this.startPixels(p, L);
+    if (st.selection && !isGroup(L) && !L.smart && d.target === 'layer') return this.startPixels(p, L);
     const ids = d.selIds.size > 1 && d.selIds.has(L.id) ? [...d.selIds] : [L.id];
     this.m = { type: 'items', ids, p0: p, dx: 0, dy: 0 };
     return true;
@@ -982,6 +1171,16 @@ class TransformTool extends Tool {
     if (isAdjust(L) || !L.canvas) { toast('Choisissez un calque de pixels.'); return false; }
     if (!effectiveVisible(st.layers, L)) { toast('Ce calque est masqué.'); return false; }
     let src, rect;
+    if (L.smart) { // objet dynamique : on repart toujours de l'image d'origine, sans perte
+      src = L.smart.source;
+      this.base = { state: st, layer: L, holed: null, smart: true };
+      this.src = src; this.sw = src.width; this.sh = src.height;
+      this.T = smartT(L);
+      this.active = true;
+      this.render();
+      if (st.selection) toast('Objet dynamique : tout le calque est transformé.');
+      return true;
+    }
     if (st.selection) {
       const P = ensurePaintable(d, L.id);
       const sel = P.state.selection;
@@ -1033,6 +1232,7 @@ class TransformTool extends Tool {
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(this.src, 0, 0);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (final && B.smart) { freeCanvas(c); return updateSmart(B.state, B.layer.id, { T: { ...this.T } }); }
     const st = updateLayer(B.state, B.layer.id, { canvas: c, x: x0, y: y0, text: null });
     if (final) return st;
     if (this.pc && this.pc !== c) freeCanvas(this.pc);
@@ -1058,7 +1258,7 @@ class TransformTool extends Tool {
   apply() {
     if (!this.active) return;
     const st = this.render(true);
-    if (st) this.app.commit('Transformation manuelle', { ...st, selection: this._transformSel() });
+    if (st) this.app.commit('Transformation manuelle', this.base.smart ? st : { ...st, selection: this._transformSel() });
     this.end();
   }
   abort() { if (!this.active) return; this.doc?.cancelPreview(); this.end(); this.app.refresh({ history: false }); }
@@ -1066,7 +1266,7 @@ class TransformTool extends Tool {
     this.active = false;
     freeCanvas(this.pc); this.pc = null;
     if (this.base?.holed) freeCanvas(this.base.holed);
-    if (this.src && this.src !== this.base?.layer?.canvas) freeCanvas(this.src);
+    if (this.src && this.src !== this.base?.layer?.canvas && !this.base?.smart) freeCanvas(this.src); // jamais la source d'un objet dynamique
     this.src = null; this.base = null; this.drag = null;
     this.app.endTransform();
   }
@@ -1188,6 +1388,8 @@ export function createTools(app) {
     transform: new TransformTool(app, 'transform'),
     brush: new BrushTool(app, 'brush', false),
     eraser: new BrushTool(app, 'eraser', true),
+    stamp: new StampTool(app, 'stamp'),
+    heal: new HealTool(app, 'heal'),
     eyedropper: new EyedropperTool(app, 'eyedropper'),
     bucket: new BucketTool(app, 'bucket'),
     gradient: new GradientTool(app, 'gradient'),

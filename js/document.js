@@ -131,6 +131,7 @@ export class Doc {
     for (const l of state.layers) {
       if (l.canvas) set.add(l.canvas);
       if (l.mask?.canvas) set.add(l.mask.canvas);
+      if (l.smart?.source) set.add(l.smart.source);
     }
     if (state.selection?.canvas) set.add(state.selection.canvas);
     return set;

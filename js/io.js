@@ -5,6 +5,7 @@ import { flattenState } from './render.js';
 import { buildTree, normalize, isAdjust } from './tree.js';
 import { ADJ, PSD_TYPES } from './adjust.js';
 import { scaleCanvas } from './ops.js';
+import { stylesToPsd, stylesFromPsd, anyStyles } from './styles.js';
 
 let agPsdPromise = null;
 const PSD_LIB = [
@@ -116,7 +117,7 @@ export async function openPsd(file) {
   const scale = limitScale(psd.width, psd.height);
   if (scale < 1) throw new Error(`Ce PSD fait ${psd.width}×${psd.height} px : trop grand pour ${isIOS ? 'Safari sur iPhone / iPad' : 'ce navigateur'}.`);
   const out = [];
-  let groups = 0, adjust = 0, texts = 0;
+  let groups = 0, adjust = 0, texts = 0, fxLost = 0;
   const walk = (children, parent) => {
     for (const ch of children || []) {
       if (ch.children) {
@@ -146,10 +147,13 @@ export async function openPsd(file) {
       let canvas = ch.canvas;
       let x = ch.left ?? 0, y = ch.top ?? 0;
       if (!canvas || !canvas.width || !canvas.height) { canvas = newCanvas(psd.width, psd.height); x = 0; y = 0; }
+      let styles = null;
+      try { styles = stylesFromPsd(ch.effects, ch.fillOpacity); } catch (err) { console.warn(err); }
+      if (ch.effects?.satin || ch.effects?.patternOverlay) fxLost++;
       out.push(mkLayer({
         name: ch.name || 'Calque', canvas, x, y, parent,
         opacity: ch.opacity ?? 1, blend: ch.blendMode || 'normal', visible: !ch.hidden,
-        clipping: !!ch.clipping, mask: maskFromPsd(ch.mask),
+        clipping: !!ch.clipping, mask: maskFromPsd(ch.mask), styles,
       }));
     }
   };
@@ -157,6 +161,7 @@ export async function openPsd(file) {
   if (!out.length && psd.canvas) out.push(mkLayer({ name: 'Arrière-plan', canvas: psd.canvas }));
   if (!out.some(l => l.canvas)) throw new Error('Ce PSD ne contient aucune image lisible.');
   if (adjust) notes.push(`${adjust} calque(s) de réglage d'un type pas encore géré (mélangeur de couches, correction sélective…) ignoré(s).`);
+  if (fxLost) notes.push(`${fxLost} calque(s) avec un effet pas encore géré (satin, motif) : cet effet est ignoré.`);
   if (texts) notes.push(`${texts} calque(s) de texte ouverts comme images.`);
   void groups;
   const doc = new Doc({ name: baseName(file.name), width: psd.width, height: psd.height, layers: normalize(out), label: 'Ouverture' });
@@ -177,6 +182,7 @@ export async function docToPsdBlob(doc) {
   } : {
     name: l.name, canvas: l.canvas, left: l.x, top: l.y, opacity: l.opacity, blendMode: l.blend,
     hidden: !l.visible, clipping: l.clipping, mask: maskToPsd(l.mask),
+    ...(anyStyles(l.styles) ? { effects: stylesToPsd(l.styles), fillOpacity: l.styles.fill ?? 1 } : {}),
   }));
   const psd = { width: st.width, height: st.height, canvas: flattenState(st), children: toPsd(buildTree(st.layers)) };
   const data = ag.writePsd(psd, { generateThumbnail: true, trimImageData: true, noBackground: true });

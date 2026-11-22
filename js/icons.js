@@ -38,6 +38,9 @@ const P = {
   folder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>',
   mask: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="5" fill="currentColor" stroke="none" opacity=".85"/>',
   adjust: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor"/>',
+  liquify: '<path d="M3 7c3-3 6 3 9 0s6-3 9 0M3 12c3-3 6 3 9 0s6-3 9 0M3 17c3-3 6 3 9 0s6-3 9 0"/>',
+  smart: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M14 14h6v6M3 10V3h7"/><path d="m15 14 2.5 2.5M10 3 7 6"/>',
+  fx: '<path d="M10 5.5a2.5 2.5 0 0 0-2.5-2.5C6 3 5 4 5 6v14M2.5 10H9M13 11l7 9M20 11l-7 9"/>',
   filter: '<path d="M3 5h18l-7 8v6l-4 2v-8L3 5Z"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
 };

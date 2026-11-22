@@ -490,3 +490,4 @@ export function autoLUT(H, kind) {
   return lutTex(luts[0], luts[1], luts[2]);
 }
 export const LUT_SHADER = LUT_FRAG;
+export { slider, check, colorIn, select as selectRow };

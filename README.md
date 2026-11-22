@@ -48,13 +48,23 @@ Tout est calculé par la carte graphique (WebGL), par tuiles pour les grandes im
 - Calques de réglage non destructifs : modifiables à tout moment (double-clic sur la vignette), avec masque, opacité, mode de fusion, écrêtage ; lus et enregistrés en PSD
 - Filtres (menu Filtre) : flou gaussien, flou directionnel, accentuation, ajout de bruit, réduction du bruit, mosaïque, vignettage ; Dernier filtre (Ctrl+F)
 
+## Étape 5 — outils « pro » (v0.5.0)
+
+- Correcteur (J) : mode localisé (on peint sur le défaut, la zone voisine qui se raccorde le mieux est trouvée toute seule) ou avec source (Alt+clic) ; les couleurs et la lumière sont raccordées au pourtour
+- Tampon de duplication (S) : Alt+clic pour la source (au doigt : bouton « Choisir la source »), mode aligné, prélèvement sur le calque actif ou sur tous les calques (pratique sur un calque vide)
+- Fluidité (Ctrl+Maj+X) : déformer, reconstruire, contracter, dilater, tourbillon, taille et force, défaire geste par geste ; aperçu rapide puis application en pleine résolution, limitée à la sélection
+- Styles de calque (bouton fx) : ombre portée, ombre interne, lueur externe et interne, biseautage et estampage, contour, incrustation couleur et de dégradé, opacité du fond ; aperçu en direct, copier / coller / masquer / pixelliser le style ; lus et enregistrés en PSD
+- Objets dynamiques : transformations sans perte (on repart toujours de l'image d'origine), filtres et réglages dynamiques modifiables, masquables et supprimables à tout moment (affichés sous le calque) ; « Pixelliser » pour revenir à un calque normal
+
+Limite connue : dans un .psd, les objets dynamiques sont enregistrés comme calques normaux.
+
 ## Feuille de route
 
 1. Le socle ✔
 2. Outils de base : pinceau (pression du stylet), gomme, pot de peinture, dégradé, texte, formes, pipette, recadrage ✔
 3. Sélections et masques : rectangle, lasso, baguette magique, masques de calque, transformation libre, groupes ✔
 4. Réglages et filtres : niveaux, courbes, teinte / saturation, calques de réglage, flou, netteté ✔
-5. Outils « pro » : tampon, correcteur, fluidité, styles de calque, objets dynamiques
+5. Outils « pro » : tampon, correcteur, fluidité, styles de calque, objets dynamiques ✔
 6. IA locale : détourage, sélection d'objet, gomme magique, agrandissement, remplissage intelligent
 
 ## Mettre en ligne sur GitHub Pages
@@ -75,13 +85,16 @@ Aucune compilation : ce sont des fichiers HTML, CSS et JavaScript prêts à l'em
 | `js/ops.js` | Opérations sur les calques et l'image |
 | `js/render.js` | Composition des calques (modes de fusion, écrêtage) |
 | `js/view.js` | Zone de travail : affichage, zoom, souris, doigts |
-| `js/tools.js` | Outils : pinceau, gomme, pipette, pot, dégradé, formes, texte, recadrage |
+| `js/tools.js` | Outils : pinceau, gomme, correcteur, tampon, pipette, pot, dégradé, formes, texte, recadrage |
 | `js/paint.js` | Moteur de peinture, remplissage, dégradés, rendu du texte et des formes |
 | `js/selection.js` | Sélections : création, combinaisons, contour progressif, pointillés |
 | `js/tree.js` | Groupes de calques : arborescence et réorganisation |
 | `js/gl.js` | Moteur graphique (WebGL) : passes de calcul, tuiles |
 | `js/adjust.js` | Réglages et leurs fenêtres (niveaux, courbes…) |
 | `js/filters.js` | Filtres (flous, accentuation, bruit…) |
+| `js/styles.js`, `js/fxdialog.js` | Styles de calque (effets) et leur fenêtre |
+| `js/liquify.js` | Fluidité |
+| `js/smart.js` | Objets dynamiques et filtres dynamiques |
 | `js/panels.js` | Panneaux Calques, Historique, outils, onglets |
 | `js/io.js` | Ouverture et enregistrement des fichiers |
 | `vendor/ag-psd.min.js` | Lecture / écriture des PSD (bibliothèque ag-psd, licence MIT) |

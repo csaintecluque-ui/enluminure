@@ -1,6 +1,7 @@
 // Enluminure — opérations sur les états (chaque fonction renvoie un NOUVEL état)
 import { newCanvas, ctxOf, mkLayer } from './util.js';
 import { drawStack, flattenState, layerRect, unionRect } from './render.js';
+import { stylePad, hasStyles } from './styles.js';
 import { isGroup, isAdjust, insertAbove, removeItems, duplicateItem, siblingsOf, descendants, effectiveVisible, normalize } from './tree.js';
 
 const withLayers = (st, layers) => ({ ...st, layers: normalize(layers) });
@@ -37,13 +38,14 @@ export function mergeDown(st, id) {
   const up = st.layers.find(x => x.id === id);
   const low = lowerSibling(st, id);
   if (!up || !low || isGroup(up) || isGroup(low) || isAdjust(low) || !low.canvas) return null;
-  const r = isAdjust(up) ? layerRect(low) : unionRect(layerRect(low), layerRect(up));
+  const fxRect = (l) => { const r = layerRect(l), p = hasStyles(l) ? stylePad(l.styles) : 0; return { x: r.x - p, y: r.y - p, w: r.w + 2 * p, h: r.h + 2 * p }; };
+  const r = isAdjust(up) ? fxRect(low) : unionRect(fxRect(low), fxRect(up));
   const c = newCanvas(r.w, r.h);
   // Le calque du dessous est dessiné « à plat », celui du dessus avec son mode et son opacité (masques appliqués)
   const lowFlat = { ...low, opacity: 1, blend: 'normal', clipping: false, visible: true, parent: null };
   const upFix = { ...up, visible: true, parent: null };
   drawStack(c, [lowFlat, upFix], r.x, r.y);
-  const merged = { ...low, canvas: c, x: r.x, y: r.y, text: null, mask: null };
+  const merged = { ...low, canvas: c, x: r.x, y: r.y, text: null, mask: null, styles: null, smart: null };
   const layers = st.layers.filter(l => l !== up).map(l => (l === low ? merged : l));
   return { state: withLayers(st, layers), activeId: merged.id };
 }
@@ -207,7 +209,7 @@ export function resizeCanvasArea(st, nw, nh, anchor, fill) {
     const ctx = ctxOf(c);
     ctx.fillStyle = fill; ctx.fillRect(0, 0, nw, nh);
     if (bottom.canvas) ctx.drawImage(bottom.canvas, bottom.x, bottom.y);
-    layers = layers.map((l, k) => (k === bi ? { ...bottom, canvas: c, x: 0, y: 0, text: null } : l));
+    layers = layers.map((l, k) => (k === bi ? { ...bottom, canvas: c, x: 0, y: 0, text: null, smart: null } : l));
   }
   const sel = st.selection ? { ...st.selection, x: st.selection.x + dx, y: st.selection.y + dy } : null;
   return { ...st, width: nw, height: nh, layers, selection: sel };

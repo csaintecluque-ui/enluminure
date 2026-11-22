@@ -2,6 +2,7 @@
 import { blendOp, newCanvas, ctxOf, freeCanvas } from './util.js';
 import { buildTree, isGroup, isAdjust } from './tree.js';
 import { applyAdjust } from './adjust.js';
+import { hasStyles, renderStyles, styledMerged, freeStyled, contentBounds } from './styles.js';
 
 /** Réserve de toiles de travail de la taille de la cible (réutilisées d'une image à l'autre). */
 export class ScratchPool {
@@ -72,6 +73,55 @@ function contentOf(L, e) {
   return maskedCanvas(L, c, mc, live);
 }
 
+// ——— Styles de calque (effets), gardés en cache tant que rien ne change ———
+const styleCache = new WeakMap(); // toile du calque → [{ key, res }]
+const EMPTY = { empty: true };
+let liveStyled = null;
+
+/** Effets du calque (ou null s'il n'en a pas). */
+export function styledOf(L, e = {}) {
+  if (!hasStyles(L)) return null;
+  const ov = e.override;
+  const raw = (ov && ov.get(L.id)) || L.canvas;
+  if (!raw || !raw.width) return null;
+  const mc = L.mask ? ((ov && ov.get(`mask:${L.id}`)) || L.mask.canvas) : null;
+  const live = !!(ov && (ov.has(L.id) || ov.has(`mask:${L.id}`)));
+  const content = maskedCanvas(L, raw, mc, live);
+  if (live) { // pendant un geste : on recalcule à chaque image (sauf très grand calque : effets au lâcher)
+    if (content.width * content.height > 2500000) return null;
+    freeStyled(liveStyled);
+    liveStyled = renderStyles(L.styles, content, { x: 0, y: 0, w: content.width, h: content.height });
+    return liveStyled;
+  }
+  const m = L.mask;
+  const key = `${raw._v || 0}|${raw.width}x${raw.height}|${m ? `${mc?._v || 0},${m.x - L.x},${m.y - L.y},${m.def},${m.disabled}` : ''}|${JSON.stringify(L.styles)}`;
+  let list = styleCache.get(raw);
+  if (!list) styleCache.set(raw, list = []);
+  let hit = list.find(h => h.key === key);
+  if (!hit) {
+    const b = contentBounds(content);
+    hit = { key, res: b ? renderStyles(L.styles, content, b) : EMPTY };
+    list.unshift(hit);
+    while (list.length > 3) freeStyled(list.pop().res);
+  } else if (list[0] !== hit) { list.splice(list.indexOf(hit), 1); list.unshift(hit); }
+  return hit.res;
+}
+
+function drawStyled(ctx, L, st, e) {
+  if (st.empty) return;
+  const x = L.x + st.x - e.ox, y = L.y + st.y - e.oy;
+  ctx.save();
+  for (const b of st.behind) {
+    ctx.globalAlpha = L.opacity * b.opacity;
+    ctx.globalCompositeOperation = blendOp(b.blend);
+    ctx.drawImage(b.canvas, x, y);
+  }
+  ctx.globalAlpha = L.opacity;
+  ctx.globalCompositeOperation = blendOp(L.blend);
+  ctx.drawImage(st.body, x, y);
+  ctx.restore();
+}
+
 function scratch(target, e) {
   const t = e.pool.get(target.width, target.height);
   const ctx = ctxOf(t);
@@ -107,8 +157,12 @@ function renderIsolated(target, node, e) {
       ctx.restore();
     }
   } else {
-    const c = contentOf(L, e);
-    if (c) ctxOf(t).drawImage(c, L.x - e.ox, L.y - e.oy);
+    const st = styledOf(L, e);
+    if (st) { if (!st.empty) ctxOf(t).drawImage(styledMerged(st), L.x + st.x - e.ox, L.y + st.y - e.oy); }
+    else {
+      const c = contentOf(L, e);
+      if (c) ctxOf(t).drawImage(c, L.x - e.ox, L.y - e.oy);
+    }
   }
   return t;
 }
@@ -156,6 +210,8 @@ function renderLevel(target, nodes, e) {
     const passThrough = group && L.blend === 'pass through' && L.opacity >= 1 && !(L.mask && !L.mask.disabled);
 
     if (!vis.length && !group) {
+      const st = styledOf(L, e);
+      if (st) { drawStyled(ctx, L, st, e); continue; }
       const c = contentOf(L, e);
       if (!c) continue;
       ctx.save();
@@ -174,12 +230,16 @@ function renderLevel(target, nodes, e) {
       for (const c of vis) {
         if (isAdjust(c.layer)) { applyAdjustLayer(t, c.layer, e, true); continue; }
         const ct = c.children ? renderIsolated(target, c, e) : null;
-        const src = ct || contentOf(c.layer, e);
+        const sty = ct ? null : styledOf(c.layer, e);
+        if (sty?.empty) continue;
+        const src = ct || (sty ? styledMerged(sty) : contentOf(c.layer, e));
         if (!src) continue;
         tctx.save();
         tctx.globalAlpha = c.layer.opacity;
         tctx.globalCompositeOperation = 'source-atop';
-        if (ct) tctx.drawImage(ct, 0, 0); else tctx.drawImage(src, c.layer.x - e.ox, c.layer.y - e.oy);
+        if (ct) tctx.drawImage(ct, 0, 0);
+        else if (sty) tctx.drawImage(src, c.layer.x + sty.x - e.ox, c.layer.y + sty.y - e.oy);
+        else tctx.drawImage(src, c.layer.x - e.ox, c.layer.y - e.oy);
         tctx.restore();
         if (ct) e.pool.put(ct);
       }

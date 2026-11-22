@@ -189,8 +189,22 @@ export class Stroke {
     const o = this.o;
     const s = Math.max(0.5, o.size * (o.pSize ? clamp(p, 0.04, 1) : 1));
     const a = o.flow * (o.pOpacity ? clamp(p, 0.02, 1) : 1);
-    this.bctx.globalAlpha = a;
-    this.bctx.drawImage(this.stamp, x - s / 2, y - s / 2, s, s);
+    if (o.clone) { // tampon : on recopie la source à travers la forme du pinceau
+      const bx = Math.floor(x - s / 2), by = Math.floor(y - s / 2), n = Math.ceil(s) + 2;
+      if (!this.dabC || this.dabC.width < n) { freeCanvas(this.dabC); this.dabC = newCanvas(n, n); }
+      const t = ctxOf(this.dabC);
+      t.save();
+      t.globalCompositeOperation = 'copy';
+      t.drawImage(o.clone.src, bx + o.clone.sx, by + o.clone.sy, n, n, 0, 0, n, n);
+      t.globalCompositeOperation = 'destination-in';
+      t.drawImage(this.stamp, x - s / 2 - bx, y - s / 2 - by, s, s);
+      t.restore();
+      this.bctx.globalAlpha = a;
+      this.bctx.drawImage(this.dabC, 0, 0, n, n, bx, by, n, n);
+    } else {
+      this.bctx.globalAlpha = a;
+      this.bctx.drawImage(this.stamp, x - s / 2, y - s / 2, s, s);
+    }
     this._grow({ x: Math.floor(x - s / 2) - 1, y: Math.floor(y - s / 2) - 1, w: Math.ceil(s) + 3, h: Math.ceil(s) + 3 });
   }
 
@@ -238,7 +252,104 @@ export class Stroke {
     freeCanvas(buf);
   }
 
-  cancel() { this.doc.cancelPreview(); freeCanvas(this.buf); }
+  cancel() { this.doc.cancelPreview(); freeCanvas(this.buf); freeCanvas(this.dabC); }
+}
+
+// ——— Correcteur : recopie d'une zone source + raccord des couleurs (champ de différence lissé) ———
+/** Remplit les valeurs inconnues (poids 0) par interpolation douce (pyramide « push-pull »). */
+function pushPull(val, w, W, H) {
+  if (W <= 1 && H <= 1) return;
+  const W2 = Math.ceil(W / 2), H2 = Math.ceil(H / 2);
+  const v2 = new Float32Array(W2 * H2 * 4), w2 = new Float32Array(W2 * H2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, wi = w[i];
+    if (!wi) continue;
+    const j = (y >> 1) * W2 + (x >> 1);
+    for (let c = 0; c < 4; c++) v2[j * 4 + c] += val[i * 4 + c] * wi;
+    w2[j] += wi;
+  }
+  for (let j = 0; j < W2 * H2; j++) {
+    const ws = w2[j];
+    if (ws > 0) for (let c = 0; c < 4; c++) v2[j * 4 + c] /= ws;
+    w2[j] = Math.min(1, ws);
+  }
+  pushPull(v2, w2, W2, H2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, wi = w[i];
+    if (wi >= 1) continue;
+    const fx = clamp((x + 0.5) / 2 - 0.5, 0, W2 - 1), fy = clamp((y + 0.5) / 2 - 0.5, 0, H2 - 1);
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(W2 - 1, x0 + 1), y1 = Math.min(H2 - 1, y0 + 1);
+    const ax = fx - x0, ay = fy - y0;
+    for (let c = 0; c < 4; c++) {
+      const up = (v2[(y0 * W2 + x0) * 4 + c] * (1 - ax) + v2[(y0 * W2 + x1) * 4 + c] * ax) * (1 - ay)
+        + (v2[(y1 * W2 + x0) * 4 + c] * (1 - ax) + v2[(y1 * W2 + x1) * 4 + c] * ax) * ay;
+      val[i * 4 + c] = wi * val[i * 4 + c] + (1 - wi) * up;
+    }
+  }
+}
+
+/**
+ * Correcteur : T = pixels d'origine, S = pixels source (même taille W × H), M = masque 0..1.
+ * La différence T − S, connue autour du masque, est prolongée en douceur à l'intérieur :
+ * la texture vient de la source, les couleurs et la lumière viennent du pourtour.
+ * overlay = true : renvoie seulement la retouche (alpha = masque), à poser sur un calque vide.
+ */
+export function healPixels(T, S, M, overlay = false) {
+  const W = T.width, H = T.height, n = W * H, t = T.data, s = S.data;
+  const diff = new Float32Array(n * 4), w = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (M[i] > 0.001) continue;
+    for (let c = 0; c < 4; c++) diff[i * 4 + c] = t[i * 4 + c] - s[i * 4 + c];
+    w[i] = 1;
+  }
+  pushPull(diff, w, W, H);
+  const out = new ImageData(W, H), o = out.data;
+  for (let i = 0; i < n; i++) {
+    const m = M[i], k = i * 4;
+    if (overlay) {
+      for (let c = 0; c < 3; c++) o[k + c] = s[k + c] + diff[k + c];
+      o[k + 3] = clamp(s[k + 3] + diff[k + 3], 0, 255) * m;
+    } else for (let c = 0; c < 4; c++) o[k + c] = t[k + c] * (1 - m) + clamp(s[k + c] + diff[k + c], 0, 255) * m;
+  }
+  return out;
+}
+
+/**
+ * Correcteur localisé : cherche autour de la retouche la zone qui se raccorde le mieux.
+ * img = pixels de la zone E (coordonnées ex, ey) ; B = zone retouchée ; M = masque de B.
+ * Renvoie { ox, oy } (décalage vers la source) ou null.
+ */
+export function findHealOffset(img, ex, ey, B, M, size) {
+  const W = B.w, H = B.h, d = img.data, EW = img.width, EH = img.height;
+  const step = Math.max(1, Math.round(Math.sqrt((W * H) / 3000)));
+  const ring = [], inside = [];
+  for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step) (M[y * W + x] <= 0.001 ? ring : inside).push(x, y);
+  if (!inside.length) return null;
+  const big = Math.max(W, H);
+  const dists = [1.1, 1.6, 2.3, 3.2].map(k => k * size);
+  if (big <= size * 4) dists.push(0.9 * big, 1.3 * big);
+  let best = null;
+  for (const D of dists) for (let a = 0; a < 16; a++) {
+    const ox = Math.round(Math.cos(a * Math.PI / 8) * D), oy = Math.round(Math.sin(a * Math.PI / 8) * D);
+    if (B.x + ox < ex || B.y + oy < ey || B.x + ox + W > ex + EW || B.y + oy + H > ey + EH) continue;
+    // la source ne doit pas reprendre la zone à corriger
+    let over = 0;
+    for (let k = 0; k < inside.length; k += 2) {
+      const x = inside[k] + ox, y = inside[k + 1] + oy;
+      if (x >= 0 && y >= 0 && x < W && y < H && M[y * W + x] > 0.05) over++;
+    }
+    if (over > inside.length / 2 * 0.03) continue;
+    let e = 0;
+    for (let k = 0; k < ring.length; k += 2) {
+      const X = B.x + ring[k] - ex, Y = B.y + ring[k + 1] - ey;
+      const t = (Y * EW + X) * 4, s = ((Y + oy) * EW + X + ox) * 4;
+      const dr = d[t] - d[s], dg = d[t + 1] - d[s + 1], db = d[t + 2] - d[s + 2], da = d[t + 3] - d[s + 3];
+      e += dr * dr + dg * dg + db * db + da * da;
+    }
+    e = e / Math.max(1, ring.length / 2) * (1 + D / size * 0.04); // légère préférence pour les sources proches
+    if (!best || e < best.e) best = { e, ox, oy };
+  }
+  return best;
 }
 
 // ——— Pipette ———
