@@ -8,9 +8,11 @@ import {
 } from './paint.js';
 import { applyBuf } from './document.js';
 import { isGroup, isAdjust, moveItems, effectiveVisible } from './tree.js';
-import { selRect, selPolygon, selFromRegion, combineSel, moveSel, selContains, cutOut, clipSelToDoc, featherSel, alphaBounds } from './selection.js';
+import { selRect, selPolygon, selFromRegion, combineSel, moveSel, selContains, cutOut, clipSelToDoc, featherSel, alphaBounds, trimSel } from './selection.js';
 import { openDialog, field, toast } from './ui.js';
 import { smartT, updateSmart } from './smart.js';
+import * as AI from './ai.js';
+import { aiRun, aiInpaint, selectSubject } from './aiui.js';
 
 export const DEFAULT_SETTINGS = {
   move: { autoSelect: false },
@@ -22,6 +24,8 @@ export const DEFAULT_SETTINGS = {
   eraser: { size: 50, hardness: 0.8, opacity: 1, flow: 1, pSize: true, pOpacity: false },
   stamp: { size: 60, hardness: 0.5, opacity: 1, flow: 1, pSize: true, pOpacity: false, aligned: true, all: false },
   heal: { size: 40, hardness: 0.6, mode: 'spot', aligned: true, all: false, pSize: true },
+  remove: { size: 60, hardness: 0.7, all: false, pSize: true },
+  objsel: { mode: 'new', feather: 0 },
   eyedropper: { all: true, size: 1 },
   bucket: { tolerance: 32, contiguous: true, all: false, opacity: 1 },
   gradient: { type: 'linear', toTransparent: false, reverse: false, opacity: 1 },
@@ -309,7 +313,10 @@ class HealTool extends SourceTool {
     finally { freeCanvas(st.buf); freeCanvas(st.dabC); if (smp.snap) freeCanvas(smp.src); }
   }
   cancel() { super.cancel(); if (this.smp?.snap) freeCanvas(this.smp.src); this.smp = null; }
-  key(e, k) { return (k === '[' || k === ']') ? super.key(e, k) : false; }
+  key(e, k) {
+    if (k === 'j' && e.shiftKey) { this.app.setTool('remove'); return true; }
+    return (k === '[' || k === ']') ? super.key(e, k) : false;
+  }
   heal(st, smp, off) {
     const doc = this.doc, P = st.P, c = P.canvas, s = this.s;
     const abort = () => { doc.cancelPreview(); this.app.refresh({ history: false }); };
@@ -363,6 +370,50 @@ class HealTool extends SourceTool {
     else bar.append(
       optSelect('Prélever', s.all ? 'all' : 'layer', [['layer', 'Calque actif'], ['all', 'Tous les calques']], v => { s.all = v === 'all'; this.save(); }),
       el('span', { class: 'opt-hint' }, 'Peignez sur le défaut : la correction se fait au lâcher'));
+  }
+}
+
+// ——— Suppression (gomme magique IA) : on peint sur l'objet, l'IA le remplace par le décor ———
+class RemoveTool extends SourceTool {
+  usesSource() { return false; }
+  down(p, e) {
+    if (this.busy) return false;
+    const L = this.pixelLayer(); if (!L) return false;
+    const P = prepareTarget(this.doc, L.id); if (!P) return false;
+    const s = this.s;
+    this.stroke = new Stroke(this.app, P, { size: s.size, hardness: s.hardness, flow: 1, opacity: 0.5, pSize: s.pSize, pOpacity: false, color: '#d0503c', erase: false });
+    this.stroke.point(p.x, p.y, pressureOf(e));
+    this.stroke.flush();
+    return true;
+  }
+  async up() {
+    const st = this.stroke;
+    if (!st) return;
+    this.stroke = null;
+    const d = this.doc, P = st.P;
+    if (d.live !== st.live || !st.bounds) { st.cancel(); return; }
+    this.busy = true;
+    try {
+      const sel = d.committed.selection;
+      await aiInpaint(this.app, {
+        layerId: P.layer.id, prepared: P, sampleAll: this.s.all, label: 'Suppression (IA)',
+        mask: { canvas: st.buf, x: P.ox, y: P.oy }, limit: sel ? { canvas: sel.canvas, x: sel.x, y: sel.y } : null,
+      });
+    } finally {
+      this.busy = false;
+      freeCanvas(st.buf); freeCanvas(st.dabC);
+    }
+  }
+  key(e, k) {
+    if (k === 'j' && e.shiftKey) { this.app.setTool('heal'); return true; }
+    return (k === '[' || k === ']') ? super.key(e, k) : false;
+  }
+  options(bar) {
+    const s = this.s;
+    this.sizeCtl = optRange('Taille', s.size, { min: 1, max: 1000, log: true, unit: 'px' }, v => { s.size = v; this.save(); this.app.view.requestRender(); });
+    bar.append(this.sizeCtl,
+      optSelect('Prélever', s.all ? 'all' : 'layer', [['layer', 'Calque actif'], ['all', 'Tous les calques']], v => { s.all = v === 'all'; this.save(); }),
+      el('span', { class: 'opt-hint' }, "Peignez sur ce qu'il faut faire disparaître : l'IA le remplace au lâcher"));
   }
 }
 
@@ -1156,6 +1207,68 @@ class WandTool extends SelectTool {
       optCheck('Tous les calques', s.all, v => { s.all = v; this.save(); }),
       el('span', { class: 'opt-hint' }, 'Maj : ajouter · Alt : soustraire'));
   }
+  key(e, k) { if (k === 'w' && e.shiftKey) { this.app.setTool('objsel'); return true; } return false; }
+}
+
+// ——— Sélection d'objet (IA) : un clic sur l'objet, ou un cadre autour ———
+/** Clé qui change dès que les pixels visibles changent (pas quand seule la sélection change). */
+function pixelsKey(d) {
+  const st = d.committed;
+  const parts = st.layers.map(l => [l.id, l.canvas?._v || 0, l.canvas?.width, l.x, l.y, l.visible, l.opacity, l.blend, l.mask?.canvas?._v || 0, l.mask?.disabled, !!l.styles].join(','));
+  return `${d.id}|${st.width}x${st.height}|${parts.join(';')}`;
+}
+class ObjectSelectTool extends SelectTool {
+  down(p, e) {
+    if (!this.doc || this.busy) return false;
+    this.drag = { a: { x: p.x, y: p.y }, b: { x: p.x, y: p.y }, mode: this.modeFor(e) };
+    return true;
+  }
+  move(p) {
+    const g = this.drag; if (!g) return;
+    g.b = { x: p.x, y: p.y };
+    this.app.view.requestRender();
+  }
+  async up() {
+    const g = this.drag; this.drag = null;
+    if (!g) return;
+    this.app.view.requestRender();
+    const d = this.doc;
+    const r = { x0: Math.min(g.a.x, g.b.x), y0: Math.min(g.a.y, g.b.y), x1: Math.max(g.a.x, g.b.x), y1: Math.max(g.a.y, g.b.y) };
+    const isBox = r.x1 - r.x0 > 6 / d.view.zoom && r.y1 - r.y0 > 6 / d.view.zoom;
+    if (!isBox && (g.a.x < 0 || g.a.y < 0 || g.a.x >= d.width || g.a.y >= d.height)) return;
+    this.busy = true;
+    try {
+      await aiRun(async () => {
+        await AI.samPrepare(pixelsKey(d), d.composite());
+        AI.progress.show("Recherche de l'objet…");
+        const res = await AI.samSegment(isBox ? { box: r } : { points: [{ x: g.a.x, y: g.a.y, label: 1 }] });
+        if (!res) { toast("Aucun objet net ici : essayez un cadre autour de l'objet."); return; }
+        const c = newCanvas(d.width, d.height), ctx = ctxOf(c);
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(res.canvas, 0, 0, d.width, d.height);
+        freeCanvas(res.canvas);
+        const sel = trimSel({ canvas: c, x: 0, y: 0 });
+        if (!sel) { toast('Aucun objet trouvé ici.'); return; }
+        this.finish(sel, g.mode, "Sélection d'objet");
+      });
+    } finally { this.busy = false; }
+  }
+  overlay(ctx, view) {
+    const g = this.drag; if (!g) return;
+    const A = view.toScreen({ x: Math.min(g.a.x, g.b.x), y: Math.min(g.a.y, g.b.y) }), B = view.toScreen({ x: Math.max(g.a.x, g.b.x), y: Math.max(g.a.y, g.b.y) });
+    if (B.x - A.x < 6 && B.y - A.y < 6) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(A.x + 0.5, A.y + 0.5, B.x - A.x, B.y - A.y);
+    antsStroke(ctx, view);
+    ctx.restore();
+  }
+  options(bar) {
+    bar.append(modeButtons(this), this.featherOpt(),
+      optButton('Sélectionner le sujet', () => selectSubject(this.app)),
+      el('span', { class: 'opt-hint' }, "Cliquez sur un objet, ou tracez un cadre autour · Maj : ajouter · Alt : retirer"));
+  }
+  key(e, k) { if (k === 'w' && e.shiftKey) { this.app.setTool('wand'); return true; } return false; }
 }
 
 // ——— Transformation manuelle ———
@@ -1390,6 +1503,8 @@ export function createTools(app) {
     eraser: new BrushTool(app, 'eraser', true),
     stamp: new StampTool(app, 'stamp'),
     heal: new HealTool(app, 'heal'),
+    remove: new RemoveTool(app, 'remove'),
+    objsel: new ObjectSelectTool(app, 'objsel'),
     eyedropper: new EyedropperTool(app, 'eyedropper'),
     bucket: new BucketTool(app, 'bucket'),
     gradient: new GradientTool(app, 'gradient'),

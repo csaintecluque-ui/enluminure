@@ -1,9 +1,9 @@
 // Enluminure — fonctionnement hors connexion.
 // Réseau d'abord (les mises à jour arrivent tout de suite), copie locale si pas de connexion.
-const CACHE = 'enluminure-v0.5.0';
+const CACHE = 'enluminure-v0.6.0';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
-  'js/main.js', 'js/util.js', 'js/document.js', 'js/render.js', 'js/ops.js', 'js/io.js', 'js/view.js', 'js/ui.js', 'js/panels.js', 'js/icons.js', 'js/tools.js', 'js/paint.js', 'js/tree.js', 'js/selection.js', 'js/gl.js', 'js/adjust.js', 'js/filters.js', 'js/styles.js', 'js/fxdialog.js', 'js/liquify.js', 'js/smart.js',
+  'js/main.js', 'js/util.js', 'js/document.js', 'js/render.js', 'js/ops.js', 'js/io.js', 'js/view.js', 'js/ui.js', 'js/panels.js', 'js/icons.js', 'js/tools.js', 'js/paint.js', 'js/tree.js', 'js/selection.js', 'js/gl.js', 'js/adjust.js', 'js/filters.js', 'js/styles.js', 'js/fxdialog.js', 'js/liquify.js', 'js/smart.js', 'js/ai.js', 'js/aiui.js',
   'vendor/ag-psd.min.js',
   'icons/sceau-enluminure.svg', 'icons/icone-appli.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
@@ -20,7 +20,25 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  // Moteur d'IA (transformers.js, version figée) : gardé pour le hors-connexion
+  if (url.hostname === 'cdn.jsdelivr.net' && url.pathname.startsWith('/npm/@huggingface/transformers@')) {
+    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
+      return res;
+    })));
+    return;
+  }
+  if (url.origin !== location.origin) return;
+  // Moteur d'IA (gros fichiers qui ne changent qu'avec la version) : copie locale d'abord
+  if (url.pathname.includes('/vendor/')) {
+    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
+      return res;
+    })));
+    return;
+  }
   e.respondWith(
     fetch(req)
       .then(res => {

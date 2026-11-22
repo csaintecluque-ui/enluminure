@@ -7,6 +7,7 @@ import { styledMerged, anyStyles } from './styles.js';
 import { styleDialog } from './fxdialog.js';
 import { liquifyDialog } from './liquify.js';
 import * as SM from './smart.js';
+import * as AIUI from './aiui.js';
 import { Viewport } from './view.js';
 import { $, toast, openDialog, confirmDialog, field, MenuBar, modalOpen } from './ui.js';
 import { initLayersPanel, renderLayers, renderHistory, renderTabs, initToolbar, renderToolbar, renderOptions, renderStatus, startRename, TOOLS } from './panels.js';
@@ -225,6 +226,14 @@ class App {
       fillBg: { enabled: hasLayer, run: () => this.fillLayer(this.colors.bg, 'Remplir (arrière-plan)') },
       clearLayer: { enabled: hasLayer, run: () => this.fillLayer(null, 'Effacer le calque') },
       editText: { enabled: () => !!D()?.active?.text, run: () => this.tools.text.edit(D().active) },
+      // ——— IA locale ———
+      selectSubject: { enabled: hasDoc, run: () => AIUI.selectSubject(this) },
+      removeBackground: { enabled: () => !!D()?.active?.canvas && !D().active.kind, run: () => AIUI.removeBackground(this) },
+      contentFill: { enabled: () => this.pixelReady() && !!D().committed.selection, run: () => AIUI.contentAwareFill(this) },
+      aiUpscale: { enabled: hasDoc, run: () => AIUI.upscaleDialog(this) },
+      aiModels: { run: () => AIUI.aiDialog(this) },
+      objselTool: { enabled: hasDoc, run: () => this.setTool('objsel') },
+      removeTool: { enabled: hasDoc, run: () => this.setTool('remove') },
       // ——— Objets dynamiques ———
       toSmart: { enabled: () => this.stylable() && !D().active.smart, run: () => {
         const d = D(), st = SM.toSmart(d.committed, d.activeId);
@@ -434,6 +443,7 @@ class App {
         { label: 'Copier avec fusion', action: 'copyMerged', key: K('Ctrl+Maj+C') },
         { label: 'Coller', action: 'paste', key: K('Ctrl+V') },
         '-',
+        { label: "Remplissage d'après le contenu (IA)", action: 'contentFill', key: 'Maj+Retour' },
         { label: 'Remplir avec le premier plan', action: 'fillFg', key: 'Alt+Retour' },
         { label: "Remplir avec l'arrière-plan", action: 'fillBg', key: K('Ctrl+Retour') },
         { label: 'Effacer le contenu du calque', action: 'clearLayer' },
@@ -452,6 +462,7 @@ class App {
         { label: 'Recadrer sur la sélection', action: 'cropToSel' },
         { label: "Taille de l'image…", action: 'imageSize', key: K('Ctrl+Alt+I') },
         { label: 'Taille de la zone de travail…', action: 'canvasSize', key: K('Ctrl+Alt+C') },
+        { label: "Agrandir avec l'IA (×2, ×4)…", action: 'aiUpscale' },
         '-',
         { heading: "Rotation de l'image" },
         { label: '90° horaire', action: 'rotCW' },
@@ -483,6 +494,8 @@ class App {
         { label: 'Renommer le calque…', action: 'renameLayer' },
         { label: 'Modifier le texte…', action: 'editText' },
         { label: 'Afficher / masquer', action: 'toggleVisible', key: K('Ctrl+,') },
+        '-',
+        { label: "Supprimer l'arrière-plan (IA)", action: 'removeBackground' },
         '-',
         { heading: 'Objet dynamique' },
         { label: 'Convertir en objet dynamique', action: 'toSmart' },
@@ -527,6 +540,10 @@ class App {
         { label: 'Resélectionner', action: 'reselect', key: K('Ctrl+Maj+D') },
         { label: 'Intervertir', action: 'invertSel', key: K('Ctrl+Maj+I') },
         '-',
+        { heading: 'Avec l\'IA' },
+        { label: 'Sujet', action: 'selectSubject' },
+        { label: "Sélection d'objet (outil)", action: 'objselTool', key: 'Maj+W' },
+        '-',
         { label: 'Contour progressif…', action: 'featherSel', key: 'Maj+F6' },
         { label: 'Dilater…', action: 'growSel' },
         { label: 'Contracter…', action: 'shrinkSel' },
@@ -556,6 +573,7 @@ class App {
         { label: 'Plein écran', action: 'fullscreen', key: 'F11' },
       ] },
       { label: 'Aide', items: [
+        { label: 'IA locale (modèles)…', action: 'aiModels' },
         { label: 'Raccourcis clavier', action: 'shortcuts' },
         { label: 'À propos d\'Enluminure', action: 'about' },
       ] },
@@ -605,7 +623,7 @@ class App {
       'ctrl+]': 'layerUp', 'ctrl+[': 'layerDown', 'ctrl+shift+]': 'layerTop', 'ctrl+shift+[': 'layerBottom',
       'ctrl+0': 'fit', 'ctrl+1': 'zoom100', 'ctrl++': 'zoomIn', 'ctrl+-': 'zoomOut',
       'delete': 'deleteLayer', 'backspace': 'deleteLayer', 'f11': 'fullscreen',
-      'alt+backspace': 'fillFg', 'alt+delete': 'fillFg', 'ctrl+backspace': 'fillBg', 'ctrl+delete': 'fillBg',
+      'shift+backspace': 'contentFill', 'alt+backspace': 'fillFg', 'alt+delete': 'fillFg', 'ctrl+backspace': 'fillBg', 'ctrl+delete': 'fillBg',
       'ctrl+a': 'selectAll', 'ctrl+d': 'deselect', 'ctrl+shift+d': 'reselect', 'ctrl+shift+i': 'invertSel', 'shift+f6': 'featherSel',
       'ctrl+t': 'freeTransform', 'ctrl+g': 'groupLayers', 'ctrl+shift+g': 'ungroupLayers', 'ctrl+x': 'cut', 'ctrl+shift+j': 'layerViaCut',
       'ctrl+l': 'adj_levels', 'ctrl+m': 'adj_curves', 'ctrl+u': 'adj_huesat', 'ctrl+b': 'adj_colorbalance', 'ctrl+alt+shift+b': 'adj_bw',
@@ -645,6 +663,8 @@ class App {
       if (ctrl || e.altKey) return;
       // Outils
       if (k === 'g' && e.shiftKey) { this.setTool(this.tool === 'bucket' ? 'gradient' : 'bucket'); return; }
+      if (k === 'w' && e.shiftKey) { this.setTool(this.tool === 'objsel' ? 'wand' : 'objsel'); return; }
+      if (k === 'j' && e.shiftKey) { this.setTool(this.tool === 'remove' ? 'heal' : 'remove'); return; }
       const tool = { v: 'move', h: 'hand', z: 'zoom', b: 'brush', e: 'eraser', g: 'gradient', i: 'eyedropper', t: 'text', u: 'shapes', c: 'crop', m: 'marquee', l: 'lasso', w: 'wand', s: 'stamp', j: 'heal' }[k];
       if (tool && !e.shiftKey) { this.setTool(tool); return; }
       if (k === 'x') { this.swapColors(); return; }
@@ -1331,6 +1351,8 @@ class App {
       ['Dégradé / Pot de peinture', 'G · Maj+G'],
       ['Texte / Formes / Recadrage', 'T · U · C'],
       ['Correcteur / Tampon de duplication', 'J · S (Alt+clic : choisir la source)'],
+      ['Suppression IA (gomme magique) / Sélection d\'objet IA', 'Maj+J · Maj+W'],
+      ["Remplissage d'après le contenu (IA)", 'Maj+Retour arrière'],
       ['Fluidité', K('Ctrl+Maj+X')],
       ['Taille du pinceau / dureté', '[ ] · Maj+[ ]'],
       ['Opacité du pinceau', '1 … 9, 0 = 100 %'],
@@ -1364,8 +1386,8 @@ class App {
       el('img', { src: 'icons/sceau-enluminure.svg', alt: '', width: 120, height: 120 }),
       el('p', {}, el('b', {}, 'Enluminure'), ` — version ${VERSION}`),
       el('p', { class: 'muted' }, "L'atelier d'images d'Anamnesis · CSC. Tout se passe sur votre appareil : aucune image n'est envoyée sur internet."),
-      el('p', { class: 'muted' }, 'Étape 5 — outils « pro » : correcteur, tampon de duplication, fluidité, styles de calque (ombre, contour, biseau…) et objets dynamiques.'),
-      el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT).'));
+      el('p', { class: 'muted' }, 'Étape 6 — IA locale : sujet, suppression de l\'arrière-plan, sélection d\'objet, gomme magique, remplissage d\'après le contenu et agrandissement, calculés sur votre appareil.'),
+      el('p', { class: 'muted small' }, 'Lecture et écriture des PSD : bibliothèque ag-psd (licence MIT). IA : transformers.js (Apache 2.0) et ONNX Runtime (MIT) ; modèles RMBG 1.4 (BRIA AI, usage non commercial), SAM 2.1 (Meta), MI-GAN (Picsart), Real-ESRGAN (Xintao Wang).'));
     openDialog({ title: 'À propos', body, buttons: [{ label: 'Fermer', primary: true }] });
   }
 }

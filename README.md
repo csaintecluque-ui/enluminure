@@ -58,6 +58,27 @@ Tout est calculé par la carte graphique (WebGL), par tuiles pour les grandes im
 
 Limite connue : dans un .psd, les objets dynamiques sont enregistrés comme calques normaux.
 
+## Étape 6 — IA locale (v0.6.0)
+
+Les modèles d'IA tournent **dans le navigateur, sur l'appareil** : sur la carte graphique quand elle est disponible (WebGPU — la RTX du PC, la puce de l'iPhone), sinon sur le processeur. Chaque modèle est téléchargé une seule fois depuis Hugging Face, puis reste sur l'appareil et fonctionne hors connexion. **Les images ne quittent jamais l'appareil.**
+
+- Sélection > Sujet : sélectionne le sujet principal de la photo
+- Calque > Supprimer l'arrière-plan : ajoute un masque de fusion autour du sujet (rien n'est effacé, le masque se retouche au pinceau)
+- Outil Sélection d'objet (Maj+W) : un clic sur un objet, ou un cadre autour ; Maj ajoute, Alt retire
+- Outil Suppression — gomme magique (Maj+J) : on peint sur ce qui doit disparaître, l'IA le remplace par le décor
+- Édition > Remplissage d'après le contenu (Maj+Retour arrière) : remplace le contenu de la sélection
+- Image > Agrandir avec l'IA (×2, ×4) : le résultat s'ouvre dans un nouvel onglet, l'original n'est pas modifié
+- Aide > IA locale : liste des modèles, place occupée, tout télécharger pour le hors-connexion, choix carte graphique / processeur
+
+| Fonction | Modèle | Licence | Taille |
+|---|---|---|---|
+| Sujet, arrière-plan | RMBG 1.4 (BRIA AI) | usage personnel, non commercial | 44 à 176 Mo |
+| Sélection d'objet | SAM 2.1 tiny (Meta), sinon SlimSAM | Apache 2.0 | ≈ 155 Mo |
+| Suppression, remplissage | MI-GAN (Picsart AI Research) | MIT | 28 Mo |
+| Agrandissement | Real-ESRGAN ×4 (Xintao Wang) | BSD-3 | 67 Mo |
+
+Moteur : ONNX Runtime Web (MIT), fourni dans `vendor/ort/`, et transformers.js 4.3.2 (Apache 2.0), chargé une fois depuis jsDelivr puis gardé pour le hors-connexion.
+
 ## Feuille de route
 
 1. Le socle ✔
@@ -65,7 +86,7 @@ Limite connue : dans un .psd, les objets dynamiques sont enregistrés comme calq
 3. Sélections et masques : rectangle, lasso, baguette magique, masques de calque, transformation libre, groupes ✔
 4. Réglages et filtres : niveaux, courbes, teinte / saturation, calques de réglage, flou, netteté ✔
 5. Outils « pro » : tampon, correcteur, fluidité, styles de calque, objets dynamiques ✔
-6. IA locale : détourage, sélection d'objet, gomme magique, agrandissement, remplissage intelligent
+6. IA locale : détourage, sélection d'objet, gomme magique, agrandissement, remplissage intelligent ✔
 
 ## Mettre en ligne sur GitHub Pages
 
@@ -95,6 +116,8 @@ Aucune compilation : ce sont des fichiers HTML, CSS et JavaScript prêts à l'em
 | `js/styles.js`, `js/fxdialog.js` | Styles de calque (effets) et leur fenêtre |
 | `js/liquify.js` | Fluidité |
 | `js/smart.js` | Objets dynamiques et filtres dynamiques |
+| `js/ai.js`, `js/aiui.js` | IA locale : moteur, modèles, et leurs fonctions dans l'appli |
+| `vendor/ort/` | Moteur d'IA (ONNX Runtime Web) |
 | `js/panels.js` | Panneaux Calques, Historique, outils, onglets |
 | `js/io.js` | Ouverture et enregistrement des fichiers |
 | `vendor/ag-psd.min.js` | Lecture / écriture des PSD (bibliothèque ag-psd, licence MIT) |

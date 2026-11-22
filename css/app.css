@@ -457,3 +457,14 @@ kbd { font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--parc
 .sf-name:hover { color: var(--copper-2); }
 .sf-del { background: none; border: 0; color: var(--muted); padding: 4px; cursor: pointer; display: grid; place-items: center; }
 .sf-del:hover { color: var(--danger); }
+
+/* ——— IA locale ——— */
+#busy-msg { white-space: pre-line; text-align: center; max-width: min(520px, 90vw); line-height: 1.5; }
+.busy-bar { width: min(360px, 80vw); height: 8px; border-radius: 4px; background: rgba(234,217,184,.15); overflow: hidden; }
+.busy-bar i { display: block; height: 100%; width: 0; background: var(--copper); transition: width .2s; }
+.busy-cancel { margin-top: 4px; }
+.ai-models { width: 100%; border-collapse: collapse; margin: 8px 0 12px; }
+.ai-models td { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+.ai-models td:last-child { white-space: nowrap; }
+.ai-models td.num { white-space: nowrap; color: var(--copper-2); text-align: right; }
+.modal-actions { flex-wrap: wrap; }
